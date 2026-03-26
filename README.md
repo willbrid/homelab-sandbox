@@ -6,9 +6,19 @@ Ce repository documente mon environnement de lab personnel basé sur **Proxmox V
 git clone https://github.com/willbrid/homelab-sandbox.git
 ```
 
+> **Note**: La mise en place de notre infrastructure sur Proxmox est entièrement automatisée grâce à `OpenTofu`.
+
 ### Configuration des templates
 
 Grâce à nos modules, nous déployons automatiquement nos templates Proxmox pour les systèmes **Ubuntu 24.04**, **Rocky Linux 9.7** et **Rocky Linux 10**.
+
+- Générer notre clé publique afin de l’intégrer à nos templates
+
+```
+ssh-keygen -t ed25519 -C "tofu-proxmox" -f ~/.ssh/id_ed25519_proxmox-server
+```
+
+> NB: Ne renseignez pas de mot de passe pendant la génération de la clé avec `ssh-keygen` : appuyez sur **Entrée** pour ignorer cette étape.
 
 - Définir son fichier **templates.auto.tfvars** contenant les variables
 
@@ -29,4 +39,13 @@ ssh_public_key   = "xxx"
 
 --- **proxmox_url**      : url web de proxmox <br>
 --- **proxmox_username** : identifiant d'accès <br>
---- **proxmox_password** : mot de passe d'accès
+--- **proxmox_password** : mot de passe d'accès <br>
+--- **ssh_public_key**   : emplacement local du fichier clé public généré
+
+- Exécuter les commandes **tofu** pour créer nos templates
+
+```
+tofu init
+tofu plan
+tofu apply
+```
