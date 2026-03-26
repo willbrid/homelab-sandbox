@@ -7,6 +7,10 @@ resource "proxmox_virtual_environment_vm" "vm" {
     full  = true
   }
 
+  agent {
+    enabled = true
+  }
+
   cpu    { cores = var.cores }
   memory { dedicated = var.memory }
 
@@ -21,11 +25,6 @@ resource "proxmox_virtual_environment_vm" "vm" {
     size         = var.disk_size
     discard      = "on"
     iothread     = true
-  }
-
-  network_device {
-    bridge = "vmbr0"
-    model  = "virtio"
   }
 
   initialization {

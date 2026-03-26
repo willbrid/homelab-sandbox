@@ -30,10 +30,8 @@ resource "proxmox_virtual_environment_vm" "template" {
   # Cloud-Init drive
   initialization {
     datastore_id = var.storage_vm
-    ip_config {
-      ipv4 { address = "dhcp" }
-    }
-    
+
+    network_data_file_id = proxmox_virtual_environment_file.network_data_cloud_config.id 
     user_data_file_id = proxmox_virtual_environment_file.user_data_cloud_config.id
   }
 }

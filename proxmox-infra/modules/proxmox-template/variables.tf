@@ -19,10 +19,28 @@ variable "proxmox_password" {
   sensitive   = true
 }
 
+variable "vm_hostname" {
+  type        = string
+  description = "default vm hostname injected via cloud-init"
+  default     = "server"
+}
+
 variable "vm_user" {
   type        = string
   description = "default user injected via cloud-init"
   default     = "tofu"
+}
+
+variable "vm_user_group" {
+  type        = string
+  description = "default user group injected via cloud-init"
+  default     = "tofu"
+}
+
+variable "vm_additional_ip" {
+  type        = string
+  description = "additional ip the secondary interface"
+  default     = "172.16.0.10/12"
 }
 
 variable "name" { 
