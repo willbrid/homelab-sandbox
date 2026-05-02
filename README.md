@@ -17,7 +17,7 @@ Grâce à nos modules, nous déployons automatiquement nos templates Proxmox pou
 --- Se connecter sur le noeud Proxmox via SSH (root)
 
 ```
-vesh create /nodes/pve/network \
+pvesh create /nodes/pve/network \
   --iface vmbr1 \
   --type bridge \
   --autostart 1 \
