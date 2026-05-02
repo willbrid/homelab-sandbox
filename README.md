@@ -69,3 +69,23 @@ tofu init
 tofu plan
 tofu apply
 ```
+
+### Quelques commandes utiles dans Proxmox
+
+- Stopper une vm d'id `VMID`
+
+```
+qm stop $VMID
+```
+
+- Supprimer une vm d'id `VMID`
+
+```
+qm destroy $VMID --purge 1 --destroy-unreferenced-disks 1
+```
+
+- Supprimer un template d'id `TPLID`
+
+```
+qm destroy $TPLID --purge 1 --destroy-unreferenced-disks 1
+```
