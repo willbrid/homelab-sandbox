@@ -12,6 +12,26 @@ git clone https://github.com/willbrid/homelab-sandbox.git
 
 Grâce à nos modules, nous déployons automatiquement nos templates Proxmox pour les systèmes **Ubuntu 24.04**, **Rocky Linux 9.7** et **Rocky Linux 10**.
 
+- Créer une interface réseau **vmbr1** sur proxmox
+
+--- Se connecter sur le noeud Proxmox via SSH (root)
+
+```
+vesh create /nodes/pve/network \
+  --iface vmbr1 \
+  --type bridge \
+  --autostart 1 \
+  --comments "Internal bridge for secondary NICs"
+```
+
+--- Appliquer la configuration réseau
+
+```
+pvesh set /nodes/pve/network
+```
+
+> NB: Sautez cette étape si cette interface est déjà créée.
+
 - Générer notre clé publique afin de l’intégrer à nos templates
 
 ```
