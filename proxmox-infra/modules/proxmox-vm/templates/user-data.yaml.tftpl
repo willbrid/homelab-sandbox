@@ -1,0 +1,17 @@
+#cloud-config
+package_update: ${package_update}
+package_upgrade: ${package_upgrade}
+users:
+  - name: ${cloud_init_user}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+%{ if length(user_groups) > 0 ~}
+    groups: [${join(", ", user_groups)}]
+%{ endif ~}
+%{ if length(ssh_keys) > 0 ~}
+    ssh_authorized_keys:
+%{ for key in ssh_keys ~}
+      - ${key}
+%{ endfor ~}
+%{ endif ~}
