@@ -200,6 +200,28 @@ variable "snippets_storage_id" {
   default     = "local"
 }
 
+variable "configure_network_in_cloudinit" {
+  description = <<-EOT
+    Injecte la configuration réseau statique dans le user-data cloud-init (bloc network: version 2).
+    Requis pour Rocky Linux : la config réseau via Proxmox ip_config n'est pas appliquée de manière
+    fiable. Pour Ubuntu, laisser à false — la config réseau est gérée par le bloc initialization.
+  EOT
+  type    = bool
+  default = false
+}
+
+variable "network_interface_primary" {
+  description = "Nom de l'interface réseau primaire dans l'OS cible (ex: eth0, ens3)."
+  type        = string
+  default     = "eth0"
+}
+
+variable "network_interface_secondary" {
+  description = "Nom de l'interface réseau secondaire dans l'OS cible (ex: eth1, ens4)."
+  type        = string
+  default     = "eth1"
+}
+
 # ── Système ───────────────────────────────────────────────────────────────────
 
 variable "qemu_agent_enabled" {

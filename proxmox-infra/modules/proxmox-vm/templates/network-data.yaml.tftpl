@@ -1,0 +1,19 @@
+version: 2
+ethernets:
+  ${network_interface_primary}:
+    dhcp4: no
+    addresses:
+      - ${ip_address_primary}
+%{ if ip_gateway_primary != null ~}
+    gateway4: ${ip_gateway_primary}
+%{ endif ~}
+%{ if length(dns_servers) > 0 ~}
+    nameservers:
+      addresses: [${join(", ", dns_servers)}]
+%{ endif ~}
+%{ if ip_address_secondary != null ~}
+  ${network_interface_secondary}:
+    dhcp4: no
+    addresses:
+      - ${ip_address_secondary}
+%{ endif ~}

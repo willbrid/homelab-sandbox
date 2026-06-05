@@ -19,13 +19,34 @@ resource "proxmox_virtual_environment_file" "user_data" {
 
   source_raw {
     data = templatefile("${path.module}/templates/user-data.yaml.tftpl", {
-      package_update   = var.cloud_init_package_update
-      package_upgrade  = var.cloud_init_package_upgrade
-      cloud_init_user  = var.cloud_init_user
-      user_groups      = var.cloud_init_user_groups
-      ssh_keys         = var.cloud_init_ssh_keys
+      package_update  = var.cloud_init_package_update
+      package_upgrade = var.cloud_init_package_upgrade
+      cloud_init_user = var.cloud_init_user
+      user_groups     = var.cloud_init_user_groups
+      ssh_keys        = var.cloud_init_ssh_keys
     })
     file_name = "${var.vm_name}-user-data.yaml"
+  }
+}
+
+# Snippet network-data (Netplan v2) : utilisé uniquement pour Rocky Linux.
+# network_data_file_id est incompatible avec ip_config dans le bloc initialization.
+resource "proxmox_virtual_environment_file" "network_data" {
+  count        = var.configure_network_in_cloudinit ? 1 : 0
+  content_type = "snippets"
+  datastore_id = var.snippets_storage_id
+  node_name    = var.node_name
+
+  source_raw {
+    data = templatefile("${path.module}/templates/network-data.yaml.tftpl", {
+      network_interface_primary   = var.network_interface_primary
+      network_interface_secondary = var.network_interface_secondary
+      ip_address_primary          = var.ip_address_primary
+      ip_gateway_primary          = var.ip_gateway_primary
+      ip_address_secondary        = var.ip_address_secondary
+      dns_servers                 = var.dns_servers
+    })
+    file_name = "${var.vm_name}-network-data.yaml"
   }
 }
 
@@ -85,27 +106,31 @@ resource "proxmox_virtual_environment_vm" "vm" {
   }
 
   initialization {
-    datastore_id      = var.disk_storage_id
-    user_data_file_id = proxmox_virtual_environment_file.user_data.id
-    # Désactive ciupgrade dans Proxmox (visible en UI : "Mettre à jour les paquets").
-    # La valeur de package_upgrade dans le fichier user-data contrôle le comportement
-    # réel de cloud-init, mais ce champ aligne l'UI Proxmox avec cette intention.
-    upgrade           = var.cloud_init_package_upgrade
+    datastore_id         = var.disk_storage_id
+    user_data_file_id    = proxmox_virtual_environment_file.user_data.id
+    # Rocky Linux : réseau géré par network_data_file_id (Netplan v2).
+    # Ubuntu       : réseau géré par ip_config ci-dessous.
+    # Les deux options sont mutuellement exclusives dans le provider BPG.
+    network_data_file_id = one(proxmox_virtual_environment_file.network_data[*].id)
+    upgrade              = var.cloud_init_package_upgrade
 
     dns {
       servers = var.dns_servers
       domain  = var.dns_domain
     }
 
-    ip_config {
-      ipv4 {
-        address = local.ipv4_primary
-        gateway = local.gateway_primary
+    dynamic "ip_config" {
+      for_each = var.configure_network_in_cloudinit ? [] : [1]
+      content {
+        ipv4 {
+          address = local.ipv4_primary
+          gateway = local.gateway_primary
+        }
       }
     }
 
     dynamic "ip_config" {
-      for_each = local.configure_secondary ? [1] : []
+      for_each = (!var.configure_network_in_cloudinit && local.configure_secondary) ? [1] : []
       content {
         ipv4 {
           address = local.ipv4_secondary
@@ -121,5 +146,8 @@ resource "proxmox_virtual_environment_vm" "vm" {
   scsi_hardware = "virtio-scsi-single"
   boot_order    = ["scsi0"]
 
-  depends_on = [proxmox_virtual_environment_file.user_data]
+  depends_on = [
+    proxmox_virtual_environment_file.user_data,
+    proxmox_virtual_environment_file.network_data,
+  ]
 }
