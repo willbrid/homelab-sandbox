@@ -29,11 +29,6 @@ variable "tags" {
 
 # ── Image cloud ───────────────────────────────────────────────────────────────
 
-variable "image_url" {
-  description = "URL de téléchargement de l'image cloud (qcow2 ou img)."
-  type        = string
-}
-
 variable "image_filename" {
   description = "Nom du fichier image stocké dans Proxmox (ex: noble-server-cloudimg-amd64.img)."
   type        = string

@@ -1,16 +1,3 @@
-# Télécharge l'image cloud sur le nœud Proxmox via l'API.
-# overwrite = false rend l'opération idempotente : si le fichier existe déjà
-# sur le stockage Proxmox, il n'est pas re-téléchargé.
-resource "proxmox_download_file" "cloud_image" {
-  content_type        = "iso"
-  datastore_id        = var.image_storage_id
-  node_name           = var.node_name
-  url                 = var.image_url
-  file_name           = var.image_filename
-  overwrite           = false
-  overwrite_unmanaged = false
-}
-
 resource "proxmox_virtual_environment_vm" "template" {
   name        = var.template_name
   description = var.description
@@ -34,10 +21,10 @@ resource "proxmox_virtual_environment_vm" "template" {
     dedicated = var.memory
   }
 
-  # Disque racine importé depuis l'image cloud téléchargée.
+  # Disque racine importé depuis l'image locale dans le stockage ISO Proxmox.
   disk {
     datastore_id = var.disk_storage_id
-    file_id      = proxmox_download_file.cloud_image.id
+    file_id      = "${var.image_storage_id}:iso/${var.image_filename}"
     interface    = "scsi0"
     size         = var.disk_size
     file_format  = var.disk_format
@@ -103,5 +90,4 @@ resource "proxmox_virtual_environment_vm" "template" {
     type = "serial0"
   }
 
-  depends_on = [proxmox_download_file.cloud_image]
 }
