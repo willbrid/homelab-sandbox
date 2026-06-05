@@ -47,6 +47,8 @@ module "vm" {
   snippets_storage_id    = var.snippets_storage_id
   os_type                = local.os.os_type
 
+  configure_network_in_cloudinit = false
+
   timeout_clone    = var.timeout_clone
   timeout_start_vm = var.timeout_start_vm
 }
