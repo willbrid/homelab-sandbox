@@ -1,0 +1,50 @@
+# Copier en terraform.tfvars et adapter.
+
+proxmox_endpoint     = "https://192.168.1.10:8006"
+proxmox_username     = "terraform@pam"
+proxmox_password     = "changeme"
+proxmox_insecure_tls = true
+proxmox_ssh_username = "root"
+proxmox_ssh_password = "changeme"
+
+default_node_name = "pve"
+disk_storage_id   = "local-lvm"
+template_vm_id    = 9000
+
+default_cpu_cores = 2
+default_memory    = 2048
+default_disk_size = 30
+
+network_bridge_primary   = "vmbr0"
+network_bridge_secondary = "vmbr1"
+dns_servers              = ["192.168.1.1", "8.8.8.8"]
+dns_domain               = "homelab.local"
+
+cloud_init_ssh_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@workstation",
+]
+
+vms = {
+  "ubuntu-web-01" = {
+    vm_id                  = 101
+    description            = "Serveur web Ubuntu 24.04"
+    tags                   = ["web"]
+    ip_address_primary     = "192.168.1.101/24"
+    ip_gateway_primary     = "192.168.1.1"
+    # ip_address_secondary : forcer une IP statique sur vmbr1 écrase l'héritage
+    # ipconfig1=ip=dhcp du template et évite toute attente DHCP au démarrage.
+    # Ne pas mettre de gateway sur l'interface secondaire (route par défaut = primaire).
+    ip_address_secondary   = "192.168.2.101/24"
+  }
+  "ubuntu-db-01" = {
+    vm_id                  = 102
+    description            = "Base de données Ubuntu 24.04"
+    tags                   = ["db"]
+    cpu_cores              = 4
+    memory                 = 4096
+    disk_size              = 50
+    ip_address_primary     = "192.168.1.102/24"
+    ip_gateway_primary     = "192.168.1.1"
+    ip_address_secondary   = "192.168.2.102/24"
+  }
+}
