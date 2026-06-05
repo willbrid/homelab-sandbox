@@ -1,0 +1,48 @@
+# Copier en terraform.tfvars et adapter.
+
+proxmox_endpoint     = "https://192.168.1.10:8006"
+proxmox_username     = "terraform@pam"
+proxmox_password     = "changeme"
+proxmox_insecure_tls = true
+proxmox_ssh_username = "root"
+proxmox_ssh_password = "changeme"
+
+default_node_name = "pve"
+disk_storage_id   = "local-lvm"
+template_vm_id    = 9002
+
+default_cpu_cores = 2
+default_memory    = 2048
+default_disk_size = 30
+
+network_bridge_primary   = "vmbr0"
+network_bridge_secondary = "vmbr1"
+dns_servers              = ["192.168.1.1", "8.8.8.8"]
+dns_domain               = "homelab.local"
+
+cloud_init_ssh_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@workstation",
+]
+
+vms = {
+  "rocky10-app-01" = {
+    vm_id                = 301
+    description          = "Serveur applicatif Rocky Linux 10"
+    tags                 = ["app"]
+    ip_address_primary   = "192.168.1.301/24"
+    ip_gateway_primary   = "192.168.1.1"
+    # ip_address_secondary écrase l'héritage ipconfig1=ip=dhcp du template.
+    # Pas de gateway sur l'interface secondaire.
+    ip_address_secondary = "192.168.2.201/24"
+  }
+  "rocky10-app-02" = {
+    vm_id                = 302
+    description          = "Serveur applicatif Rocky Linux 10"
+    tags                 = ["app"]
+    cpu_cores            = 4
+    memory               = 4096
+    ip_address_primary   = "192.168.1.202/24"
+    ip_gateway_primary   = "192.168.1.1"
+    ip_address_secondary = "192.168.2.202/24"
+  }
+}
