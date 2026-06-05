@@ -1,6 +1,8 @@
 #cloud-config
 package_update: ${package_update}
 package_upgrade: ${package_upgrade}
+packages:
+  - qemu-guest-agent
 users:
   - name: ${cloud_init_user}
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -15,3 +17,5 @@ users:
       - ${key}
 %{ endfor ~}
 %{ endif ~}
+runcmd:
+  - systemctl enable --now qemu-guest-agent
