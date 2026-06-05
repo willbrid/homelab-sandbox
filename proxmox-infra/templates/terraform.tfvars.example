@@ -1,0 +1,43 @@
+# Copier ce fichier en terraform.tfvars et adapter les valeurs.
+# Ne jamais versionner terraform.tfvars (déjà dans .gitignore).
+
+# ── Connexion Proxmox ─────────────────────────────────────────────────────────
+proxmox_endpoint     = "https://192.168.1.10:8006"
+proxmox_username     = "terraform@pam"     # ou root@pam
+proxmox_password     = "changeme"          # préférer PROXMOX_VE_PASSWORD
+proxmox_insecure_tls = true                # false si certificat TLS valide
+proxmox_ssh_username = "root"
+proxmox_ssh_password = "changeme"          # ou utiliser un agent SSH
+
+# ── Infrastructure ────────────────────────────────────────────────────────────
+node_name       = "pve"
+disk_storage_id = "local-lvm"   # LVM thin-pool → disk_format = "raw"
+                                 # Pour qcow2 utiliser "local" (répertoire)
+image_storage_id = "local"      # Stockage ISO/images cloud
+
+# ── Réseau (deux interfaces par template) ─────────────────────────────────────
+network_bridge_primary   = "vmbr0"   # Management / LAN
+network_bridge_secondary = "vmbr1"   # Workload / Data / Supervision
+# network_vlan_primary   = 10        # Décommenter pour activer le VLAN
+# network_vlan_secondary = 20
+
+# ── Cloud-init ────────────────────────────────────────────────────────────────
+cloud_init_user     = "ansible"
+cloud_init_ssh_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@workstation",
+]
+
+# ── CPU / RAM ─────────────────────────────────────────────────────────────────
+cpu_cores = 2
+cpu_type  = "x86-64-v2-AES"
+memory    = 2048
+
+# ── IDs et tailles des templates ──────────────────────────────────────────────
+ubuntu_2404_vm_id    = 9000
+ubuntu_2404_disk_size = 20
+
+rocky_9_vm_id    = 9001
+rocky_9_disk_size = 20
+
+rocky_10_vm_id    = 9002
+rocky_10_disk_size = 20
