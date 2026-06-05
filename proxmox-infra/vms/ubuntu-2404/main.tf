@@ -47,6 +47,7 @@ module "vm" {
   snippets_storage_id    = var.snippets_storage_id
   os_type                = local.os.os_type
   
+  qemu_agent_enabled = true
   configure_network_in_cloudinit = false
 
   timeout_clone    = var.timeout_clone
