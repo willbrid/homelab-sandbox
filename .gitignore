@@ -1,15 +1,30 @@
 # ==================
-# OpenTofu State
+# OpenTofu / Terraform
 # ==================
 
+# État local
 *.tfstate
 *.tfstate.*
 *.tfstate.backup
-.terraform/
-.terraform.lock.hcl
-.tofu/
+
+# Cache provider (partout dans l'arborescence)
+**/.terraform/
+**/.tofu/
+
+# Lock file (versionner si reproductibilité souhaitée)
+**/.terraform.lock.hcl
+
+# Plans binaires
 *.tfplan
 *.plan
+
+# Fichiers de crash
+crash.log
+crash.*.log
+
+# Fichiers générés par terraform-docs / terragrunt
+.terragrunt-cache/
+**/.terragrunt-cache/
 
 # ===========================
 # Secrets and Variables
