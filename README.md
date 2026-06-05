@@ -51,16 +51,16 @@ vi templates.auto.tfvars
 ```
 
 ```
-proxmox_url      = "https://@IP:8006"
-proxmox_username = "xxx
-proxmox_password = "xxx"
-ssh_public_key   = "xxx"
+proxmox_url         = "https://@IP:8006"
+proxmox_username    = "xxx
+proxmox_password    = "xxx"
+cloud_init_ssh_keys = ["xxx"]
 ```
 
---- **proxmox_url**      : url web de proxmox <br>
---- **proxmox_username** : identifiant d'accès <br>
---- **proxmox_password** : mot de passe d'accès <br>
---- **ssh_public_key**   : emplacement local du fichier clé public généré
+--- **proxmox_url**            : url web de proxmox <br>
+--- **proxmox_username**       : identifiant d'accès <br>
+--- **proxmox_password**       : mot de passe d'accès <br>
+--- **cloud_init_ssh_keys**[i] : contenu du fichier clé public généré
 
 - Exécuter les commandes **tofu** pour créer nos templates
 
