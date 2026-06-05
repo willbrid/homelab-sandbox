@@ -10,7 +10,7 @@ git clone https://github.com/willbrid/homelab-sandbox.git
 
 ### Configuration des templates
 
-Grâce à nos modules, nous déployons automatiquement nos templates Proxmox pour les systèmes **Ubuntu 24.04**, **Rocky Linux 9.7** et **Rocky Linux 10**.
+Grâce à nos modules, nous déployons automatiquement nos templates Proxmox pour les systèmes **Ubuntu 24.04**, **Rocky Linux 9.8** et **Rocky Linux 10**.
 
 - Créer une interface réseau **vmbr1** sur proxmox
 
