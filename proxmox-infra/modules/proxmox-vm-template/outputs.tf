@@ -14,6 +14,6 @@ output "node_name" {
 }
 
 output "cloud_image_id" {
-  description = "Identifiant Proxmox du fichier image téléchargé (ex: local:iso/noble-server-cloudimg-amd64.img)."
-  value       = proxmox_download_file.cloud_image.id
+  description = "Référence Proxmox du fichier image local (ex: local:iso/noble-server-cloudimg-amd64-agent.img)."
+  value       = "${var.image_storage_id}:iso/${var.image_filename}"
 }
