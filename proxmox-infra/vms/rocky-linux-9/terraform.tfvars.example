@@ -24,6 +24,18 @@ cloud_init_ssh_keys = [
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@workstation",
 ]
 
+# ── Extinction / arrêt ────────────────────────────────────────────────────────
+# Éteindre une VM sans la détruire (disques et configuration conservés) :
+#   - durablement    : started = false dans le bloc vms ci-dessous ;
+#   - ponctuellement : tofu apply -var='stopped_vms=["rocky9-app-02"]'
+# Dans les deux cas l'arrêt est gracieux : l'OS invité dispose de
+# timeout_shutdown_vm secondes pour se fermer proprement, après quoi Proxmox
+# force l'arrêt. Rallumer = remettre started = true / vider stopped_vms.
+# stopped_vms = ["rocky9-app-02"]
+timeout_shutdown_vm = 600
+timeout_stop_vm     = 300
+stop_on_destroy     = false
+
 vms = {
   "rocky9-app-01" = {
     vm_id                = 201
@@ -42,5 +54,7 @@ vms = {
     ip_address_primary   = "192.168.1.202/24"
     ip_gateway_primary   = "192.168.1.1"
     ip_address_secondary = "192.168.2.202/24"
+    # started             = false  # éteint cette VM sans la détruire
+    # timeout_shutdown_vm = 900    # VM plus longue à s'arrêter (bases de données...)
   }
 }

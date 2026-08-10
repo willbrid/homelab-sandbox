@@ -5,6 +5,7 @@ output "vms" {
       vm_id         = vm.vm_id
       vm_name       = vm.vm_name
       node_name     = vm.node_name
+      started       = vm.started
       ipv4_addresses = vm.ipv4_addresses
     }
   }

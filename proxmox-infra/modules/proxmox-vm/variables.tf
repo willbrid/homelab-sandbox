@@ -34,9 +34,13 @@ variable "on_boot" {
 }
 
 variable "started" {
-  description = "État de la VM après création (true = démarrée)."
-  type        = bool
-  default     = true
+  description = <<-EOT
+    État d'alimentation souhaité de la VM. Passer à false éteint la VM sans la
+    détruire (disques, config et cloud-init conservés) ; repasser à true la
+    rallume. L'extinction est gracieuse et bornée par timeout_shutdown_vm.
+  EOT
+  type    = bool
+  default = true
 }
 
 # ── Clonage depuis le template ────────────────────────────────────────────────
@@ -252,4 +256,44 @@ variable "timeout_start_vm" {
   EOT
   type        = number
   default     = 1800
+}
+
+variable "timeout_shutdown_vm" {
+  description = <<-EOT
+    Délai en secondes laissé à l'OS invité pour s'arrêter proprement (arrêt
+    gracieux via ACPI / qemu-guest-agent) lorsque started passe à false ou lors
+    d'un destroy avec stop_on_destroy = false.
+    Passé ce délai, Proxmox force l'arrêt : la VM finit donc toujours par
+    s'éteindre, mais les services ont le temps de se fermer proprement.
+    Nécessite qemu_agent_enabled = true — sans agent le provider procède
+    directement à un arrêt brutal.
+  EOT
+  type    = number
+  default = 600
+
+  validation {
+    condition     = var.timeout_shutdown_vm >= 30
+    error_message = "timeout_shutdown_vm doit valoir au moins 30 secondes pour laisser l'OS s'arrêter."
+  }
+}
+
+variable "timeout_stop_vm" {
+  description = <<-EOT
+    Timeout en secondes de l'arrêt brutal (équivalent `qm stop`). Utilisé
+    uniquement quand aucun arrêt gracieux n'est possible : stop_on_destroy = true
+    ou qemu-guest-agent désactivé.
+  EOT
+  type    = number
+  default = 300
+}
+
+variable "stop_on_destroy" {
+  description = <<-EOT
+    Comportement lors d'un `tofu destroy` :
+    - false (défaut) : arrêt gracieux (borné par timeout_shutdown_vm) puis suppression.
+    - true           : arrêt brutal immédiat puis suppression — plus rapide, mais
+                       sans laisser l'OS invité fermer ses services.
+  EOT
+  type    = bool
+  default = false
 }

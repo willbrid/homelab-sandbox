@@ -85,3 +85,53 @@ run "rocky9_multiple_vms" {
     error_message = "Deux VMs Rocky Linux 9 doivent être planifiées."
   }
 }
+
+# ── Test : extinction d'une VM sans destruction ───────────────────────────────
+
+run "rocky9_vm_stopped_via_started_flag" {
+  command = plan
+
+  variables {
+    vms = {
+      "rocky9-vm-01" = {
+        vm_id               = 201
+        started             = false
+        timeout_shutdown_vm = 120
+      }
+    }
+  }
+
+  assert {
+    condition     = module.vm["rocky9-vm-01"].started == false
+    error_message = "started = false doit éteindre la VM sans la détruire."
+  }
+
+  assert {
+    condition     = module.vm["rocky9-vm-01"].vm_id == 201
+    error_message = "La VM éteinte doit être conservée avec son ID Proxmox."
+  }
+}
+
+# ── Test : extinction ponctuelle via stopped_vms ──────────────────────────────
+
+run "rocky9_vm_stopped_via_stopped_vms" {
+  command = plan
+
+  variables {
+    stopped_vms = ["rocky9-vm-01"]
+    vms = {
+      "rocky9-vm-01" = { vm_id = 201 }
+      "rocky9-vm-02" = { vm_id = 202 }
+    }
+  }
+
+  assert {
+    condition     = module.vm["rocky9-vm-01"].started == false
+    error_message = "Une VM listée dans stopped_vms doit être éteinte."
+  }
+
+  assert {
+    condition     = module.vm["rocky9-vm-02"].started == true
+    error_message = "Une VM absente de stopped_vms doit rester démarrée."
+  }
+}

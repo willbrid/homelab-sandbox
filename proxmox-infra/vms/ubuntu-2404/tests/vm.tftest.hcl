@@ -116,3 +116,53 @@ run "ubuntu_base_tags_applied" {
     error_message = "La VM avec tags personnalisés doit être planifiée."
   }
 }
+
+# ── Test : extinction d'une VM sans destruction ───────────────────────────────
+
+run "ubuntu_vm_stopped_via_started_flag" {
+  command = plan
+
+  variables {
+    vms = {
+      "ubuntu-vm-01" = {
+        vm_id               = 101
+        started             = false
+        timeout_shutdown_vm = 120
+      }
+    }
+  }
+
+  assert {
+    condition     = module.vm["ubuntu-vm-01"].started == false
+    error_message = "started = false doit éteindre la VM sans la détruire."
+  }
+
+  assert {
+    condition     = module.vm["ubuntu-vm-01"].vm_id == 101
+    error_message = "La VM éteinte doit être conservée avec son ID Proxmox."
+  }
+}
+
+# ── Test : extinction ponctuelle via stopped_vms ──────────────────────────────
+
+run "ubuntu_vm_stopped_via_stopped_vms" {
+  command = plan
+
+  variables {
+    stopped_vms = ["ubuntu-vm-01"]
+    vms = {
+      "ubuntu-vm-01" = { vm_id = 101 }
+      "ubuntu-vm-02" = { vm_id = 102 }
+    }
+  }
+
+  assert {
+    condition     = module.vm["ubuntu-vm-01"].started == false
+    error_message = "Une VM listée dans stopped_vms doit être éteinte."
+  }
+
+  assert {
+    condition     = module.vm["ubuntu-vm-02"].started == true
+    error_message = "Une VM absente de stopped_vms doit rester démarrée."
+  }
+}

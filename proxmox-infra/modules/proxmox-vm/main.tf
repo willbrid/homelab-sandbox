@@ -68,6 +68,15 @@ resource "proxmox_virtual_environment_vm" "vm" {
   timeout_clone    = var.timeout_clone
   timeout_start_vm = var.timeout_start_vm
 
+  # Extinction : quand `started` passe à false (ou lors d'un destroy sans
+  # stop_on_destroy), le provider appelle l'API shutdown de Proxmox avec
+  # forceStop=1 et timeout=timeout_shutdown_vm. Concrètement : demande ACPI/agent
+  # à l'OS d'abord, arrêt forcé seulement si l'OS n'a pas rendu la main dans ce
+  # délai. La VM et ses disques sont conservés.
+  timeout_shutdown_vm = var.timeout_shutdown_vm
+  timeout_stop_vm     = var.timeout_stop_vm
+  stop_on_destroy     = var.stop_on_destroy
+
   agent {
     enabled = var.qemu_agent_enabled
   }
@@ -150,4 +159,14 @@ resource "proxmox_virtual_environment_vm" "vm" {
     proxmox_virtual_environment_file.user_data,
     proxmox_virtual_environment_file.network_data,
   ]
+}
+
+# L'arrêt gracieux n'est tenté par le provider que si le qemu-guest-agent est
+# activé sur la VM ; sinon il bascule directement sur un arrêt brutal
+# (équivalent d'une coupure d'alimentation) et timeout_shutdown_vm est ignoré.
+check "graceful_shutdown_requires_agent" {
+  assert {
+    condition     = var.qemu_agent_enabled || var.started
+    error_message = "VM ${var.vm_name} : qemu_agent_enabled = false, l'extinction sera brutale (arrêt forcé immédiat) et timeout_shutdown_vm ne sera pas appliqué."
+  }
 }

@@ -18,7 +18,9 @@ module "vm" {
   description    = each.value.description
   tags           = concat(local.os.base_tags, each.value.tags)
   on_boot        = each.value.on_boot
-  started        = each.value.started
+  # Éteindre une VM sans la détruire : soit started = false dans var.vms, soit son
+  # nom dans var.stopped_vms (surcharge ponctuelle, sans éditer terraform.tfvars).
+  started        = each.value.started && !contains(var.stopped_vms, each.key)
   template_vm_id = var.template_vm_id
 
   disk_storage_id = var.disk_storage_id
@@ -52,4 +54,10 @@ module "vm" {
 
   timeout_clone    = var.timeout_clone
   timeout_start_vm = var.timeout_start_vm
+
+  # Extinction gracieuse : l'OS invité dispose de timeout_shutdown_vm secondes
+  # pour s'arrêter proprement avant que Proxmox ne force l'arrêt.
+  timeout_shutdown_vm = coalesce(each.value.timeout_shutdown_vm, var.timeout_shutdown_vm)
+  timeout_stop_vm     = var.timeout_stop_vm
+  stop_on_destroy     = var.stop_on_destroy
 }

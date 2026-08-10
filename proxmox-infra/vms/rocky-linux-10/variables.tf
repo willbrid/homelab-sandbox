@@ -163,6 +163,55 @@ variable "timeout_start_vm" {
   default = 3600
 }
 
+# ── Extinction / arrêt ────────────────────────────────────────────────────────
+
+variable "stopped_vms" {
+  description = <<-EOT
+    Noms des VMs à éteindre sans les détruire. Surcharge le champ `started` de
+    var.vms, ce qui permet un arrêt ponctuel sans modifier terraform.tfvars :
+
+      tofu apply -var='stopped_vms=["<nom-de-la-vm>"]'
+
+    Retirer le nom de la liste puis réappliquer rallume la VM. Les disques, la
+    configuration et le cloud-init sont conservés dans tous les cas.
+
+    NB : `on_boot` reste indépendant — une VM éteinte mais gardée à on_boot = true
+    redémarrera au reboot du nœud Proxmox (le prochain apply la ré-éteindra).
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = length(setsubtract(var.stopped_vms, keys(var.vms))) == 0
+    error_message = "stopped_vms référence des VMs absentes de var.vms : ${join(", ", tolist(setsubtract(var.stopped_vms, keys(var.vms))))}."
+  }
+}
+
+variable "timeout_shutdown_vm" {
+  description = <<-EOT
+    Délai en secondes laissé à l'OS invité pour s'arrêter proprement (ACPI /
+    qemu-guest-agent) avant que Proxmox ne force l'arrêt. Surchargeable par VM
+    via le champ timeout_shutdown_vm de var.vms.
+  EOT
+  type        = number
+  default     = 600
+}
+
+variable "timeout_stop_vm" {
+  description = "Timeout en secondes de l'arrêt brutal (`qm stop`), utilisé quand aucun arrêt gracieux n'est possible."
+  type        = number
+  default     = 300
+}
+
+variable "stop_on_destroy" {
+  description = <<-EOT
+    true = arrêt brutal avant suppression lors d'un `tofu destroy`.
+    false (défaut) = arrêt gracieux borné par timeout_shutdown_vm.
+  EOT
+  type        = bool
+  default     = false
+}
+
 # ── Définition des VMs ────────────────────────────────────────────────────────
 
 variable "vms" {
@@ -184,6 +233,9 @@ variable "vms" {
     network_vlan_primary   = optional(number)
     network_vlan_secondary = optional(number)
     on_boot                = optional(bool, true)
-    started                = optional(bool, true)
+    # started = false éteint la VM sans la détruire (voir aussi var.stopped_vms).
+    started = optional(bool, true)
+    # Délai d'arrêt propre spécifique à cette VM. null = var.timeout_shutdown_vm.
+    timeout_shutdown_vm = optional(number)
   }))
 }
