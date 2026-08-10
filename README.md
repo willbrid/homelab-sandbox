@@ -127,6 +127,56 @@ tofu plan
 tofu apply
 ```
 
+### Supprimer un template précis
+
+Les trois templates sont gérés dans un même état OpenTofu (`proxmox-infra/templates`) : un `tofu destroy` sans argument les supprimerait tous. Pour n'en supprimer qu'un — ici `rocky_linux_10_template` — il faut cibler son module avec `-target`.
+
+- Se placer dans le répertoire des templates
+
+```
+cd proxmox-infra/templates
+```
+
+- Retrouver l'adresse du module dans l'état
+
+```
+tofu state list
+```
+
+```
+module.rocky_linux_10_template.proxmox_virtual_environment_vm.template
+module.rocky_linux_9_template.proxmox_virtual_environment_vm.template
+module.ubuntu_2404_template.proxmox_virtual_environment_vm.template
+```
+
+- Vérifier ce qui sera détruit, sans rien appliquer
+
+```
+tofu plan -destroy -target=module.rocky_linux_10_template
+```
+
+Le plan doit annoncer **1 ressource à détruire** et aucune autre modification.
+
+- Supprimer le template
+
+```
+tofu destroy -target=module.rocky_linux_10_template
+```
+
+> NB: OpenTofu affiche un avertissement rappelant que `-target` est réservé aux opérations exceptionnelles. Il est attendu ici : les deux autres templates restent intacts et l'état demeure cohérent.
+
+- Recréer le template ensuite
+
+```
+tofu apply -target=module.rocky_linux_10_template
+```
+
+L'image `Rocky-10-GenericCloud-Base.latest.x86_64-agent.img` restant présente dans le stockage ISO, il est inutile de relancer `download-proxmox-image.sh`.
+
+> NB: Les VMs déjà déployées depuis ce template ne sont **pas** impactées — le clonage se fait en mode *full*, chaque VM dispose donc d'une copie indépendante du disque. En revanche, toute nouvelle VM créée depuis `proxmox-infra/vms/rocky-linux-10` échouera tant que le template (`template_vm_id = 9002`) n'a pas été recréé.
+
+> NB: Supprimer le template directement sur le nœud avec `qm destroy` (voir plus bas) désynchronise l'état OpenTofu : le prochain `tofu plan` proposera alors de le recréer.
+
 ### Éteindre une VM sans la détruire
 
 Les stacks du répertoire `proxmox-infra/vms` permettent d'éteindre une VM tout en conservant ses disques, sa configuration et son cloud-init.
