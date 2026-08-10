@@ -1,5 +1,5 @@
 locals {
-  # Ubuntu 24.04 LTS (Noble Numbat) — image pré-construite par build-proxmox-image.sh
+  # Ubuntu 24.04 LTS (Noble Numbat) — image pré-construite par scripts/download-proxmox-image.sh
   ubuntu_2404 = {
     vm_id           = var.ubuntu_2404_vm_id
     template_name   = "ubuntu-2404-template"
@@ -12,7 +12,7 @@ locals {
     os_type         = "l26"
   }
 
-  # Rocky Linux 9 — image pré-construite par build-proxmox-image.sh
+  # Rocky Linux 9 — image pré-construite par scripts/download-proxmox-image.sh
   rocky_linux_9 = {
     vm_id           = var.rocky_9_vm_id
     template_name   = "rocky-linux-9-template"
@@ -25,7 +25,7 @@ locals {
     os_type         = "l26"
   }
 
-  # Rocky Linux 10 — image pré-construite par build-proxmox-image.sh
+  # Rocky Linux 10 — image pré-construite par scripts/download-proxmox-image.sh
   rocky_linux_10 = {
     vm_id           = var.rocky_10_vm_id
     template_name   = "rocky-linux-10-template"
