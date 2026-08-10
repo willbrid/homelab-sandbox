@@ -24,6 +24,8 @@ resource "proxmox_virtual_environment_file" "user_data" {
       cloud_init_user = var.cloud_init_user
       user_groups     = var.cloud_init_user_groups
       ssh_keys        = var.cloud_init_ssh_keys
+      hostname        = var.vm_name
+      fqdn            = var.dns_domain != "" ? "${var.vm_name}.${var.dns_domain}" : ""
     })
     file_name = "${var.vm_name}-user-data.yaml"
   }

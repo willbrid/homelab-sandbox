@@ -1,4 +1,13 @@
 #cloud-config
+# Ce snippet remplace intégralement le user-data généré par Proxmox : le nom
+# d'hôte doit donc y être redéfini, sans quoi la VM reste sur « localhost ».
+hostname: ${hostname}
+%{ if fqdn != "" ~}
+fqdn: ${fqdn}
+# Conserve le nom court pour `hostname`, le FQDN n'allant que dans /etc/hosts.
+prefer_fqdn_over_hostname: false
+%{ endif ~}
+manage_etc_hosts: true
 package_update: ${package_update}
 package_upgrade: ${package_upgrade}
 packages:

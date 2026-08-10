@@ -10,6 +10,7 @@ locals {
     disk_format     = "raw"
     cloud_init_user = "ubuntu"
     os_type         = "l26"
+    cpu_type        = var.cpu_type
   }
 
   # Rocky Linux 9 — image pré-construite par scripts/download-proxmox-image.sh
@@ -23,6 +24,8 @@ locals {
     disk_format     = "raw"
     cloud_init_user = "rocky"
     os_type         = "l26"
+    # Rocky Linux 9 est compilé pour x86-64-v2 : le défaut de la stack convient.
+    cpu_type = var.cpu_type
   }
 
   # Rocky Linux 10 — image pré-construite par scripts/download-proxmox-image.sh
@@ -36,6 +39,11 @@ locals {
     disk_format     = "raw"
     cloud_init_user = "rocky"
     os_type         = "l26"
+    # Rocky Linux 10 (comme RHEL 10) est compilé pour x86-64-v3 : sa glibc refuse
+    # de démarrer sur un CPU x86-64-v2 (« Fatal glibc error: CPU does not support
+    # x86-64-v3 » puis panic du noyau). Aligné ici pour que les clones manuels
+    # créés depuis l'interface Proxmox héritent du bon modèle de CPU.
+    cpu_type = "x86-64-v3"
   }
 }
 
@@ -56,7 +64,7 @@ module "ubuntu_2404_template" {
   disk_format     = local.ubuntu_2404.disk_format
 
   cpu_cores          = var.cpu_cores
-  cpu_type           = var.cpu_type
+  cpu_type           = local.ubuntu_2404.cpu_type
   memory             = var.memory
   qemu_agent_enabled = var.qemu_agent_enabled
 
@@ -88,7 +96,7 @@ module "rocky_linux_9_template" {
   disk_format     = local.rocky_linux_9.disk_format
 
   cpu_cores          = var.cpu_cores
-  cpu_type           = var.cpu_type
+  cpu_type           = local.rocky_linux_9.cpu_type
   memory             = var.memory
   qemu_agent_enabled = var.qemu_agent_enabled
 
@@ -120,7 +128,7 @@ module "rocky_linux_10_template" {
   disk_format     = local.rocky_linux_10.disk_format
 
   cpu_cores          = var.cpu_cores
-  cpu_type           = var.cpu_type
+  cpu_type           = local.rocky_linux_10.cpu_type
   memory             = var.memory
   qemu_agent_enabled = var.qemu_agent_enabled
 

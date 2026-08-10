@@ -5,6 +5,15 @@ locals {
     cloud_init_groups = ["wheel", "users"]
     os_type           = "l26"
     base_tags         = ["rocky", "rocky-10", "rhel"]
+    # Rocky Linux 10 (comme RHEL 10) impose une ligne de base x86-64-v3
+    # (AVX2, BMI2, FMA, F16C, MOVBE, LZCNT). Sur un CPU x86-64-v2, le noyau
+    # démarre mais la glibc tue /init dans l'initramfs :
+    #   Fatal glibc error: CPU does not support x86-64-v3
+    #   Kernel panic - not syncing: Attempted to kill init!
+    # La VM reste alors « allumée » sans réseau ni guest agent, et le provider
+    # attend la réponse de l'agent jusqu'à expiration de timeout_start_vm.
+    # Le nœud Proxmox doit exposer un CPU compatible v3 (Haswell ou plus récent).
+    cpu_type = "x86-64-v3"
   }
 }
 
@@ -27,6 +36,7 @@ module "vm" {
   disk_size       = coalesce(each.value.disk_size, var.default_disk_size)
 
   cpu_cores = coalesce(each.value.cpu_cores, var.default_cpu_cores)
+  cpu_type  = local.os.cpu_type
   memory    = coalesce(each.value.memory, var.default_memory)
 
   network_bridge_primary   = var.network_bridge_primary
