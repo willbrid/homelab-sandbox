@@ -1,7 +1,8 @@
 # Homelab DevSecOps « willbrid » — Documentation d'architecture & Plan d'action
 
 > **Statut** : Documentation de conception (aucune implémentation à ce stade).
-> **Cible** : Proxmox VE 9.1.1 — 36 cores / 128 Go RAM, **32 vCPU / 80 Go alloués** (§2).
+> **Cible** : Proxmox VE 9.1.1 — bi-Xeon E5-2640 v3, **16 cœurs physiques / 32 threads**, 128 Go RAM, 2 nœuds NUMA. **29 vCPU / 86 Go alloués** (§2).
+> **Stockage hôte** : **SSD 1 To** réservé à Proxmox et à ses données (`local` : ISO, templates, snippets) ; **HDD 4 To** portant `local-lvm`, où vivent **tous** les disques de VM — §2.6.
 > **OS des VMs** : Rocky Linux 10 — template `9002` construit par la stack `proxmox-infra/templates`.
 > **Poste d'administration (bastion)** : machine client Ubuntu 24.04 (OpenTofu + Ansible), hors Proxmox.
 > **Domaine interne** : `willbrid.lan`.
@@ -35,9 +36,12 @@ Ce homelab met en place une chaîne DevSecOps complète et auto-suffisante, cons
 | Traces | **Tempo** (mode monolithique, backend objet) |
 | Visualisation | **Grafana** (datasources Thanos, Tempo, OpenSearch) |
 | Stockage objet | **RustFS** (Apache 2.0, S3-compatible) — buckets `thanos`, `tempo`, `velero` |
+| Stockage bloc K8s | **OpenEBS** — deux moteurs complémentaires : **Replicated PV Mayastor** (NVMe-oF/TCP, SPDK, `repl: 2`) pour ce qui doit survivre à la perte d'un nœud, **Local PV hostpath** pour l'état chaud et reconstructible — §8.8 |
+| Disques des workers | **2 disques** : `scsi0` racine 80 Go + **`scsi1` 100 Go brut**, non partitionné, non monté, non formaté — dédié au `DiskPool` Mayastor (§2.7, §4.5, §8.8) |
+| Stockage Proxmox | **Un seul datastore pour les VMs** : `local-lvm` (thin, adossé au HDD 4 To). Le SSD 1 To est réservé à Proxmox et à son stockage `local` — §2.6 |
 | IaC | **OpenTofu** (`bpg/proxmox`) + **Ansible** depuis le bastion Ubuntu |
 | PKI | **Root CA offline** (bastion) → **Intermediate CA** dans OpenBao |
-| Workers K8s | **4 vCPU / 10 Go** chacun (la pile d'observabilité vit dans le cluster) |
+| Workers K8s | **4 vCPU / 12 Go** chacun (pile d'observabilité **+ 2 Go de HugePages réservées à Mayastor**, §2.6) |
 
 ### 1.2 Principe directeur
 
@@ -47,7 +51,21 @@ L'ordre d'implémentation suit les dépendances : rien qui ait besoin de certifi
 
 ## 2. Dimensionnement & répartition des VMs
 
-Le budget est contraint (36 cores / 128 Go) et la liste d'outils s'est allongée (HAProxy dédié, stockage objet, pile d'observabilité complète). Le dimensionnement est donc **optimisé pour un homelab** : chaque service est calibré au plus juste, les rôles compatibles sont mutualisés dans une même VM sous forme de conteneurs, et l'élasticité est reportée sur les réglages de rétention plutôt que sur la RAM. **Plafond fixé à 32 vCPU**, soit 4 cores laissés à l'hyperviseur.
+**La machine, vérifiée et non supposée** (`lscpu -e`, `dmidecode -t processor`, `/sys/devices/system/cpu/*`) :
+
+| Caractéristique | Valeur |
+|---|---|
+| Processeurs | 2 × Intel Xeon **E5-2640 v3** (Haswell-EP, 2,6 GHz, turbo 3,4 GHz) |
+| **Cœurs physiques** | **16** (2 sockets × 8), tous activés au BIOS (`Core Count` = `Core Enabled`) |
+| **Threads logiques** | **32** — Hyper-Threading actif ; les CPU `N` et `N+16` partagent un cœur |
+| NUMA | 2 nœuds : `node0` = CPU 0-7,16-23 · `node1` = CPU 8-15,24-31 — 64 Go chacun |
+| RAM | 128 Go |
+| Ligne de base CPU | **x86-64-v3** confirmée (`avx2`, `bmi2`, `fma`, `f16c`, `movbe`, `abm`) — requise par Rocky Linux 10 |
+| Prérequis Mayastor | `sse4_2` présent (§8.8.1) |
+
+Le budget est donc contraint — **16 cœurs physiques et 128 Go** — et la liste d'outils s'est allongée (HAProxy dédié, stockage objet, pile d'observabilité complète, stockage répliqué). Le dimensionnement est **optimisé pour un homelab** : chaque service est calibré au plus juste, les rôles compatibles sont mutualisés dans une même VM sous forme de conteneurs, et l'élasticité est reportée sur les réglages de rétention plutôt que sur la RAM.
+
+**Plafond fixé à 29 vCPU sur 32 threads**, soit 3 threads laissés à l'hyperviseur. Ce n'est pas de la prudence de principe : Proxmox a besoin de CPU pour ses propres tâches — un *iothread* QEMU par disque (`iothread = true` dans le module), `ksmd` qui scanne 128 Go en continu (§2.3), les bridges réseau et les sauvegardes PBS. Allouer les 32 threads ne laisserait rien à ce travail-là.
 
 La cible **HA (3 control-planes + 3 workers) est la configuration de départ**, pas une phase ultérieure.
 
@@ -57,21 +75,23 @@ La cible **HA (3 control-planes + 3 workers) est la configuration de départ**, 
 | `ldap` | LLDAP (binaire Rust, ~50 Mo RSS) | 1 | 1 Go | 15 Go | Dex déporté dans K8s |
 | `openbao` | OpenBao (secrets + Intermediate CA) | 1 | 2 Go | 20 Go | Raft = quelques Mo de données |
 | `haproxy` | HAProxy L4 en amont des control-planes | 1 | 1 Go | 15 Go | passthrough TLS, pas de terminaison |
-| `platform` | GitLab CE + Harbor + **1× PostgreSQL** (Quadlet) | **6** | **16 Go** | 300 Go | poste le plus lourd du lab |
-| `data` | **OpenSearch + Dashboards** (heap 4 Go) + **RustFS** (S3) | 4 | 10 Go | 500 Go | logs centraux + buckets objet |
+| `platform` | GitLab CE + Harbor + **1× PostgreSQL** (Quadlet) | **4** | **16 Go** | 300 Go | poste le plus lourd du lab — RAM privilégiée sur le CPU (§2.4) |
+| `data` | **OpenSearch + Dashboards** (heap 4 Go) + **RustFS** (S3) | 3 | 10 Go | 500 Go | logs centraux + buckets objet |
 | `k8s-cp-1` | Control plane | 2 | 6 Go | 40 Go | membre etcd |
 | `k8s-cp-2` | Control plane | 2 | 6 Go | 40 Go | membre etcd |
 | `k8s-cp-3` | Control plane | 2 | 6 Go | 40 Go | membre etcd |
-| `k8s-worker-1` | Worker | 4 | 10 Go | 80 Go | porte la pile d'observabilité |
-| `k8s-worker-2` | Worker | 4 | 10 Go | 80 Go | |
-| `k8s-worker-3` | Worker | 4 | 10 Go | 80 Go | |
-| **Total** | | **32** | **80 Go** | **~1,23 To** | |
+| `k8s-worker-1` | Worker | 4 | 12 Go | 80 Go **+ 100 Go** | pile d'observabilité ; 2ᵉ disque brut → DiskPool Mayastor |
+| `k8s-worker-2` | Worker | 4 | 12 Go | 80 Go **+ 100 Go** | idem |
+| `k8s-worker-3` | Worker | 4 | 12 Go | 80 Go **+ 100 Go** | idem |
+| **Total** | | **29** | **86 Go** | **~1,53 To** | |
 
 ### 2.1 Bilan ressources
 
-- **32 vCPU sur 36 cores** : 4 cores restent à l'hyperviseur, sans compter que le CPU se partage (une VM à 4 vCPU ne consomme 4 cores que sous charge réelle).
-- **80 Go sur 128 Go** : ~48 Go libres. C'est la marge délibérée qui absorbera les pics (`platform` en pleine CI, compaction Thanos) et servira de budget aux expérimentations IA (§16).
-- Le disque est **provisionné, pas consommé** : avec `discard=on` et l'émulation SSD (déjà activés dans le module OpenTofu), l'usage réel démarre autour de 15 % du provisionné sur un thin pool `local-lvm`.
+- **29 vCPU sur 32 threads — mais seulement 16 cœurs physiques.** C'est le chiffre à garder en tête : le ratio est de **0,9:1 sur les threads** et de **1,8:1 sur les cœurs réels**. L'Hyper-Threading n'ajoute pas de puissance de calcul, il améliore le taux d'occupation des unités d'exécution ; deux threads d'un même cœur ne valent pas deux cœurs. Le surengagement reste sain tant que les VMs sont majoritairement au repos — ce qui est le régime normal d'un homelab.
+- **L'exception qui coûte cher : le `io-engine` Mayastor.** C'est un poller SPDK qui boucle sans jamais dormir ni bloquer : son thread est consommé à 100 % en charge **comme à vide**. Trois workers = **3 threads jamais disponibles**, soit potentiellement 3 cœurs physiques sur 16 — **près de 19 % de la puissance réelle de la machine, immobilisés en permanence** (§2.7, §17). C'est la contrepartie assumée du stockage répliqué, et c'est le poste de coût le plus important du plan après la RAM d'OpenSearch.
+- **Le CPU est la ressource rare de ce lab, pas la RAM.** 86 Go alloués sur 128 laissent 42 Go de marge confortable, tandis que le CPU est engagé à près de 90 % des threads. Toute extension future doit donc être arbitrée en vCPU d'abord — c'est l'inverse de l'intuition habituelle.
+- **86 Go sur 128 Go** : ~42 Go libres. C'est la marge délibérée qui absorbera les pics (`platform` en pleine CI, compaction Thanos) et servira de budget aux expérimentations IA (§16). Les **12 Go** des workers se lisent ainsi : **2 Go de HugePages réservées à Mayastor** (invisibles pour les pods ordinaires) + 10 Go réellement allouables, ce qui est le budget dont a besoin la pile d'observabilité (§11.7).
+- **~1,53 To provisionné sur les 4 To de `local-lvm`** : le disque est **provisionné, pas consommé** — avec `discard=on` et l'émulation SSD (déjà activés dans le module OpenTofu), l'usage réel démarre autour de 15 % du provisionné sur un thin pool. La marge est donc large, et c'est elle qui rend le second disque des workers indolore (§2.6). **Le 2ᵉ disque échappe toutefois partiellement à cette règle** : Mayastor écrit ses métadonnées de pool dès la création, et un volume répliqué alloué en *thin* côté Mayastor se matérialise sur le thin pool LVM au fil des écritures.
 
 ### 2.2 Éteindre des VMs sans casser le cluster
 
@@ -81,14 +101,16 @@ Les VMs ne tournent pas toutes en permanence : le stack OpenTofu `vms/` permet l
 |---|---|---|
 | `k8s-cp-2`, `k8s-cp-3` | **Une seule des deux à la fois** | ⚠️ etcd à 3 membres tolère **1 panne**. En éteindre **2** fait perdre le quorum : l'API server passe en lecture seule, plus aucun déploiement n'est possible |
 | `k8s-cp-1` | Comme les autres | Aucun rôle particulier une fois le cluster initialisé (le `--control-plane-endpoint` pointe sur HAProxy, pas sur cp-1) |
-| `k8s-worker-3` | Libre | Vérifier que Longhorn a re-répliqué avant d'éteindre le suivant (`numberOfReplicas: 2`) |
+| `k8s-worker-3` | Libre | ⚠️ Éteindre un worker rend son **DiskPool Mayastor indisponible** : les volumes qui y ont une réplique passent en `Degraded`. Avec `repl: 2` sur 3 nœuds, on tolère **1 worker éteint** — pas deux. Vérifier `kubectl mayastor get volumes` (état `Online`) avant d'en éteindre un autre (§8.8) |
 | `platform` | Libre | Plus de CI, plus de pull d'images depuis Harbor (les images déjà présentes sur les nœuds continuent de tourner) |
 | `data` | Libre | Perte de la collecte de logs et des écritures Thanos/Tempo pendant l'arrêt — les métriques restent tamponnées côté Prometheus |
 | `dns` | **À garder allumée** | SPOF : PKI, exposition des applications, résolution des FQDN de toutes les VMs |
 | `openbao` | **À garder allumée** | Plus d'émission ni de renouvellement de certificats, injection de secrets K8s bloquée |
 | `haproxy` | **À garder allumée** | Sans elle, plus d'accès à l'API K8s ni aux applications depuis le LAN |
 
-> **Profil économe** (~22 vCPU / 54 Go) : `dns`, `ldap`, `openbao`, `haproxy`, `data`, les 3 control-planes et 1 seul worker. On garde un cluster pleinement fonctionnel en éteignant `platform` et 2 workers — c'est le meilleur ratio, car ce sont les VMs les plus grosses et les moins critiques au repos.
+> **Profil économe** (~21 vCPU / 58 Go) : `dns`, `ldap`, `openbao`, `haproxy`, `data`, les 3 control-planes et **2 workers**. On éteint `platform` et **un seul** worker — c'est le meilleur ratio, car ce sont les VMs les plus grosses et les moins critiques au repos.
+>
+> **Le plancher est de 2 workers allumés**, et c'est le stockage qui le fixe : avec `repl: 2`, un volume dont les deux répliques vivent sur les workers 2 et 3 devient totalement inaccessible si les deux sont éteints, et le pod qui le monte reste bloqué en `ContainerCreating`. Pour descendre réellement à 1 worker, il faudrait une `StorageClass` `repl: 1` réservée aux charges sacrifiables — ce n'est pas la configuration par défaut du lab.
 
 ### 2.3 Leviers d'optimisation retenus
 
@@ -105,13 +127,18 @@ Les VMs ne tournent pas toutes en permanence : le stack OpenTofu `vms/` permet l
 
 ### 2.4 Note sur la VM `platform`
 
-Avec **6 vCPU / 16 Go**, la VM héberge GitLab CE, Harbor et un PostgreSQL unique. C'est un dimensionnement **serré mais viable** à condition de :
-- **déporter les runners CI dans K8s** (ne pas les faire tourner ici) ;
+Avec **4 vCPU / 16 Go**, la VM héberge GitLab CE, Harbor et un PostgreSQL unique. C'est le poste qui absorbe l'essentiel de la réduction à 29 vCPU, et l'arbitrage est explicite : **on lui garde sa RAM et on lui prend du CPU**. GitLab tolère bien mieux un pic de latence qu'un OOM kill de Sidekiq ou de Gitaly, et les 16 Go restent le facteur dimensionnant.
+
+Le dimensionnement est **serré mais viable** à condition de :
+- **déporter les runners CI dans K8s** (ne pas les faire tourner ici) — avec 4 vCPU, ce n'est plus une préconisation mais une obligation ;
 - surveiller la mémoire (GitLab Puma/Sidekiq + Gitaly + Harbor core/jobservice/trivy + PostgreSQL partagent 16 Go) ;
 - réduire les workers Puma de GitLab (`puma['worker_processes'] = 2`) et désactiver son Prometheus embarqué — les métriques remontent déjà en OTLP (§11) ;
-- prévoir un chemin d'upgrade à 24 Go si l'usage CI grandit : la marge du §2.1 le permet.
+- **planifier les scans Trivy de Harbor hors des heures de CI** : c'est la tâche la plus gourmande en CPU de la VM, et la seule qui soit décalable sans conséquence ;
+- activer le `housekeeping` Gitaly, qui sert autant le CPU que le disque (voir plus bas).
 
-Le disque de 300 Go doit être sur stockage rapide (SSD/NVMe) : dépôts Gitaly + blobs du registry.
+> **Le chemin d'upgrade a changé de nature.** Passer à 24 Go de RAM reste possible — la marge du §2.1 le permet largement. En revanche, **reprendre des vCPU est devenu le point dur** : il n'en reste que 3 non alloués, et ils sont la réserve de l'hyperviseur. Si la CI devient réellement pénible, l'arbitrage honnête sera de récupérer du CPU sur les workers K8s — donc de reconsidérer le coût du réacteur Mayastor (§2.7) — et non d'entamer la réserve.
+
+Le disque de 300 Go porte les dépôts Gitaly et les blobs du registry. Comme tous les disques de VM, il vit sur `local-lvm`, donc sur le HDD (§2.6) : c'est le poste le plus sensible à ce choix, les dépôts Git étant faits d'une multitude de petits fichiers. Deux réglages compensent l'essentiel — **`housekeeping` Gitaly activé** (le `git gc` regroupe les objets en packfiles, transformant des accès aléatoires en accès séquentiels) et **cache de page généreux**, la VM ayant 16 Go.
 
 ### 2.5 Note sur la VM `data`
 
@@ -119,7 +146,66 @@ Elle porte deux rôles de stockage, volontairement regroupés :
 - **OpenSearch + Dashboards** : nœud unique, `-Xms4g -Xmx4g`, swap désactivé, `bootstrap.memory_lock: true`.
 - **RustFS** : service S3-compatible (Apache 2.0), conteneur Quadlet, données sur un volume dédié.
 
+**Ses 3 vCPU** tiennent au même raisonnement que pour `platform` : OpenSearch est dimensionné par sa heap, pas par son CPU, et RustFS consomme ~200 Mo de RSS pour un travail essentiellement séquentiel. Le point de vigilance est la **compaction des index** — la mutualiser avec les fenêtres de compaction Thanos produirait deux charges CPU simultanées sur une VM qui n'a plus de marge.
+
 C'est un **point de concentration assumé** : perdre cette VM, c'est perdre en même temps les logs, les blocs Thanos/Tempo et les sauvegardes Velero. Elle est donc la **première** du plan de sauvegarde Proxmox Backup Server (§13), et les snapshots OpenSearch ne doivent **pas** être écrits sur son propre RustFS.
+
+### 2.6 Plan de stockage physique : SSD système, HDD données
+
+L'hôte Proxmox dispose de deux supports, et leur répartition est **volontairement simple** :
+
+| Support | Rôle | Ce qui y vit |
+|---|---|---|
+| **SSD 1 To** | Système de l'hyperviseur | Proxmox VE lui-même et son stockage `local` : images ISO, **template `9002`**, **snippets cloud-init** (`user-data`, `network-data` du module OpenTofu) |
+| **HDD 4 To** | **`local-lvm`** — thin pool des disques de VM | **Tous** les disques de VM sans exception : racines, disque 300 Go de `platform`, disque 500 Go de `data`, et les **3 disques OpenEBS de 100 Go** des workers |
+
+**Un seul datastore pour les VMs, et c'est un choix qui simplifie tout.** Le module `proxmox-vm` n'expose qu'un `disk_storage_id`, réutilisé pour le disque cloné et pour le drive cloud-init ; les disques supplémentaires (§4.5) en héritent par défaut. Aucune stack n'a donc à raisonner sur le placement : `disk_storage_id = "local-lvm"` dans les quatre `terraform.tfvars`, et c'est fini.
+
+**Bilan de capacité** : ~1,53 To provisionné sur 4 To, soit **38 % du pool en provisionné** et bien moins en consommé réel grâce au thin provisioning. La marge est confortable, et elle est ce qui permet d'ajouter 300 Go de disques OpenEBS sans arbitrage. Deux règles pour qu'elle le reste :
+
+- **Surveiller le taux de remplissage du thin pool** (`lvs -o lv_name,data_percent,metadata_percent`) et poser une alerte à 75 %. Un thin pool saturé met en erreur d'écriture **toutes** les VMs simultanément, y compris celles qui n'écrivaient rien — c'est le seul incident de stockage capable de tout arrêter d'un coup.
+- **Ne pas laisser le datastore Proxmox Backup Server sur ce même HDD** (§13). Il n'est pas question de place mais de support : une panne du HDD emporterait à la fois les VMs et leurs sauvegardes.
+
+> ⚠️ **Ce que la réplication protège — et ce qu'elle ne protège pas.** Les 3 `DiskPool` Mayastor sont portés par 3 VMs différentes, mais ces 3 VMs vivent sur **le même disque physique**. `repl: 2` protège donc contre la perte d'un *nœud* (VM éteinte, worker planté, drain pour mise à jour) — ce pour quoi elle est conçue et ce dont le lab a besoin. Elle ne protège **pas** contre la panne du HDD, qui reste le point de défaillance unique du stockage. La protection contre cette panne-là ne vient pas de Mayastor mais du plan de sauvegarde (§13) : PBS sur support distinct, et Velero pour les volumes du cluster.
+
+> **Note sur l'émulation SSD.** Le module active `ssd = true` sur les disques, ce qui présente le périphérique à l'OS invité comme non rotatif. C'est nécessaire pour le `discard`/TRIM qui fait vivre le thin provisioning, mais l'invité en déduit aussi un ordonnanceur d'E/S sans réordonnancement (`none`). Sur un HDD réel, l'ordonnanceur `mq-deadline` rend de meilleurs services en fusionnant les E/S. À poser par Ansible via une règle udev sur les VMs les plus sollicitées en écriture (`data`, `platform`, workers), et à mesurer avant/après plutôt qu'à appliquer par principe.
+
+### 2.7 Note sur les workers : le second disque et le coût de Mayastor
+
+Chaque worker porte **deux disques**, et cette séparation n'est pas cosmétique — c'est une exigence du moteur Replicated PV Mayastor (§8.8).
+
+| Disque | Interface | Taille | État attendu dans l'OS |
+|---|---|---:|---|
+| Racine | `scsi0` | 80 Go | Partitionné, monté sur `/` — cloné depuis le template `9002` |
+| **Pool OpenEBS** | `scsi1` | **100 Go** | **Brut** : jamais partitionné, jamais formaté, jamais monté, absent de `/etc/fstab` |
+
+> **Pourquoi un disque entier et pas un répertoire.** Mayastor ne consomme pas un système de fichiers : son `io-engine` prend le **contrôle exclusif d'un périphérique bloc** et y écrit sa propre structure de pool via SPDK, en contournant la pile de blocs du noyau. La documentation OpenEBS est explicite : une fois le pool créé, le périphérique ne doit être ni partitionné, ni formaté, ni partagé — et **toute donnée préexistante est détruite**. Un `DiskPool` posé par erreur sur le disque racine effacerait le système.
+
+**Le dimensionnement à 100 Go.** Avec 3 pools de 100 Go et `repl: 2`, la capacité utile est de **~150 Go de PV**, chaque octet écrit l'étant deux fois. C'est largement au-dessus des besoins réels de la pile déployée (Prometheus 24 h, Tempo en cache, etcd des composants, PVC applicatifs), et la marge est délibérée : elle absorbe les **rebuilds**. Quand un worker revient après extinction, Mayastor reconstruit les répliques manquantes en copiant les données à pleine vitesse sur `vmbr1` — il faut de la place libre dans le pool pour que la reconstruction aboutisse.
+
+**Ce que Mayastor coûte réellement sur chaque worker**, et c'est le vrai arbitrage de ce choix :
+
+| Ressource | Coût par worker | Nature |
+|---|---|---|
+| **HugePages** | **2 Go** (1024 pages de 2 Mo) | **Réservation ferme** : ces 2 Go sortent définitivement de la mémoire allouable aux pods, que Mayastor s'en serve ou non. D'où les 12 Go de RAM (§2.1) |
+| **CPU du `io-engine`** | **1 cœur à 100 %** | SPDK tourne en *poll mode* : le réacteur boucle sans dormir ni bloquer. Le cœur est **réellement** consommé, en charge comme à vide |
+| **RAM du `io-engine`** | ~1 Go hors HugePages | Processus, métadonnées de pool, buffers |
+| **Disque** | 100 Go provisionnés | Thin sur `local-lvm`, mais matérialisé au fil des écritures |
+
+> ⚠️ **Le cœur qui tourne à 100 % est la contrepartie à assumer**, et elle est structurante sur cette machine : 3 workers × 1 thread = **3 threads jamais disponibles sur les 32**, adossés à **16 cœurs physiques seulement** (§2). Dans le pire cas — trois réacteurs sur trois cœurs distincts — c'est **près de 19 % de la puissance réelle immobilisée en permanence**. Trois conséquences pratiques :
+> - **Limiter le réacteur à un seul cœur** (`io_engine.coreList: [3]`, soit le 4ᵉ vCPU du worker) — jamais deux, le défaut du chart n'étant pas adapté à un worker de 4 vCPU. Chaque worker n'offre donc plus que **~3 vCPU utiles** aux charges applicatives.
+> - **Ne jamais laisser deux réacteurs se retrouver sur un même cœur physique.** Sur cette machine, les threads `N` et `N+16` partagent un cœur : deux boucles d'attente active sur une même paire se disputeraient les mêmes unités d'exécution. Sans épinglage, c'est l'ordonnanceur qui décide — d'où l'intérêt de vérifier la répartition réelle sous charge (`top -H -p $(pgrep -d, kvm)`) avant de conclure que tout va bien.
+> - Le **mode interruption** est en cours d'implémentation en amont ; c'est le chemin de sortie naturel de cette contrainte, à surveiller lors des montées de version.
+
+**Ce que le HDD change, et comment le plan en tient compte.** SPDK et NVMe-oF sont conçus pour du NVMe : ici le pool est adossé au thin pool `local-lvm` du HDD (§2.6), et c'est le disque mécanique — non le chemin de données — qui fixe le plafond. Concrètement, les écritures aléatoires d'un PV répliqué frappent **deux fois le même axe** (deux répliques, un seul disque physique), en concurrence avec toutes les autres VMs. Trois décisions en découlent, et elles sont ce qui rend ce choix tenable :
+
+| Décision | Effet |
+|---|---|
+| Utiliser le schéma d'URI **`aio://`** et non `uring://` pour les `DiskPool` (§8.8) | C'est le schéma recommandé pour un périphérique non-PCI ; `io_uring` n'apporte rien sur un backend qui n'est pas NVMe |
+| Réserver la `StorageClass` répliquée à ce qui **doit survivre à la perte d'un nœud** | Grafana, ArgoCD, applications métier — des volumes petits et peu écrits |
+| Router l'**état chaud et reconstructible** vers **OpenEBS Local PV hostpath** (§8.8) | Prometheus (24 h, le long terme est sur Thanos), caches Tempo, espaces de travail des runners CI : une seule écriture au lieu de deux, et pas de traversée réseau. C'est le levier de performance le plus efficace du plan |
+
+> **Corollaire pour le placement** : ne pas mettre les charges les plus gourmandes en CPU (compactor Thanos, runners GitLab CI) sur le même worker que celui qui porte l'egress gateway (§8.6) — les deux fonctions cumulées avec le réacteur Mayastor saturent un worker de 4 vCPU.
 
 ---
 
@@ -132,7 +218,7 @@ Chaque VM porte **deux cartes réseau**, sur deux bridges Proxmox distincts. La 
 | Interface | Bridge | Réseau | Passerelle | Rôle |
 |---|---|---|---|---|
 | `eth0` | `vmbr0` (ponté sur la NIC physique) | `192.168.1.0/24` — LAN du routeur wifi | **`192.168.1.1` (route par défaut)** | **Nord-sud** : accès depuis le poste d'admin, exposition des services, sortie Internet (mises à jour, pull d'images publiques) |
-| `eth1` | `vmbr1` (bridge **isolé**, sans port physique) | `172.16.1.0/24` | **aucune** | **Est-ouest** : tout le trafic entre VMs — etcd, API K8s, PostgreSQL, LDAP, OpenBao, OTLP, S3, réplication Longhorn |
+| `eth1` | `vmbr1` (bridge **isolé**, sans port physique) | `172.16.1.0/24` | **aucune** | **Est-ouest** : tout le trafic entre VMs — etcd, API K8s, PostgreSQL, LDAP, OpenBao, OTLP, S3, **réplication NVMe-oF/TCP d'OpenEBS** |
 
 > Le LAN est bien un **`/24`** (`192.168.1.0/24`, 254 adresses), pas un `/32` — un `/32` ne désignerait qu'une seule adresse et ne permettrait aucune communication.
 
@@ -199,7 +285,7 @@ C'est le point où une conception multi-homée se paie si elle est laissée impl
 | etcd | `listen-peer-urls` / `initial-advertise-peer-urls` sur `172.16.1.2x` | Le trafic de consensus ne doit jamais transiter par le LAN |
 | Cilium | `devices=eth1`, `k8s.nodeIP` interne, `ipv4NativeRoutingCIDR=172.16.1.0/24` | Sans `devices`, Cilium tente d'attacher ses programmes eBPF aux deux interfaces |
 | sysctl | `net.ipv4.conf.all.rp_filter=0` (et `eth1`, `eth0`) | Le filtrage de chemin inverse **strict** casse le routage eBPF de Cilium sur une machine multi-homée. À poser par Ansible dans `/etc/sysctl.d/` |
-| Longhorn | `storageNetwork` sur `eth1` | La réplication de volumes est le plus gros consommateur de bande passante est-ouest |
+| OpenEBS / Mayastor | Rien à régler — **hérité de `--node-ip`** | Les cibles NVMe-oF s'annoncent sur l'`InternalIP` du nœud, donc sur `172.16.1.3x`. C'est le bénéfice direct d'avoir épinglé `--node-ip` : la réplication de volumes — plus gros consommateur de bande passante est-ouest — reste sur `vmbr1` sans configuration supplémentaire. À vérifier après installation : `kubectl -n openebs get pods -o wide` et l'adresse des cibles dans `kubectl mayastor get volumes` |
 
 > **Ce que ça donne concrètement** : un `kubectl` depuis le poste d'admin sort sur `192.168.1.200` (HAProxy), qui relaie vers `172.16.1.20-22:6443`. Tout le trafic de consensus, de stockage et d'observabilité reste sur `vmbr1`, invisible et inatteignable depuis le LAN.
 
@@ -277,14 +363,17 @@ Déploiement : CoreDNS en conteneur (Podman Quadlet) sur la VM `dns`, avec `Core
 
 ### 4.3 Structure OpenTofu
 
-Rien n'est réécrit : ce projet **consomme les modules et le template déjà construits dans `proxmox-infra/`**. Les stacks propres au homelab DevSecOps vivent dans `devsecops-homelab/vms/`, bâties exactement sur le modèle de `proxmox-infra/vms/` — une stack = un répertoire = un état OpenTofu = un `module "vm"` en `for_each` sur une `map(object)`.
+Presque rien n'est réécrit : ce projet **consomme les modules et le template déjà construits dans `proxmox-infra/`**. Les stacks propres au homelab DevSecOps vivent dans `devsecops-homelab/vms/`, bâties exactement sur le modèle de `proxmox-infra/vms/` — une stack = un répertoire = un état OpenTofu = un `module "vm"` en `for_each` sur une `map(object)`.
+
+**Une seule évolution du socle est nécessaire** : le module `proxmox-vm` ne sait aujourd'hui créer qu'un disque (`scsi0`, cloné du template). Les disques OpenEBS des workers imposent de lui ajouter des disques supplémentaires — c'est l'objet du §4.5, et c'est une extension rétrocompatible (liste vide par défaut, aucune stack existante impactée).
 
 ```
 homelab-sandbox/
-├── proxmox-infra/                      # SOCLE — existant, non modifié
+├── proxmox-infra/                      # SOCLE — existant
 │   ├── modules/
 │   │   ├── proxmox-vm-template/        # image cloud → template
 │   │   └── proxmox-vm/                 # template → VM (2 NIC, cloud-init, extinction gracieuse)
+│   │                                   # ← extension : var.extra_disks (§4.5)
 │   ├── templates/                      # stack qui construit rocky-linux-10-template (vm_id 9002)
 │   └── vms/{rocky-linux-10,rocky-linux-9,ubuntu-2404}/
 │
@@ -339,7 +428,8 @@ Le rayon d'action d'une erreur est ainsi borné : un `tofu destroy` malheureux d
 Extrait de `vms/k8s/terraform.tfvars` :
 
 ```hcl
-template_vm_id = 9002                    # rocky-linux-10-template (proxmox-infra/templates)
+template_vm_id  = 9002                   # rocky-linux-10-template (proxmox-infra/templates)
+disk_storage_id = "local-lvm"            # thin pool sur le HDD 4 To (§2.6)
 
 network_bridge_primary   = "vmbr0"       # LAN
 network_bridge_secondary = "vmbr1"       # interne, isolé
@@ -356,20 +446,32 @@ vms = {
     ip_address_primary   = "192.168.1.210/24"
     ip_gateway_primary   = "192.168.1.1"
     ip_address_secondary = "172.16.1.20/24"   # aucune passerelle : cf. §3.1
+    # pas d'extra_disks : aucun io-engine sur les control-planes (§8.8)
   }
   "k8s-worker-1" = {
     vm_id                = 221
     cpu_cores            = 4
-    memory               = 10240
-    disk_size            = 80
-    tags                 = ["k8s", "worker"]
+    memory               = 12288                    # 10 Go utiles + 2 Go de HugePages (§2.7)
+    disk_size            = 80                       # scsi0 — racine
+    tags                 = ["k8s", "worker", "openebs"]
     ip_address_primary   = "192.168.1.220/24"
     ip_gateway_primary   = "192.168.1.1"
     ip_address_secondary = "172.16.1.30/24"
+
+    # scsi1 — disque brut dédié au DiskPool Mayastor (§4.5, §8.8).
+    # Ni partitionné, ni formaté, ni monté : ni cloud-init ni Ansible n'y touchent.
+    extra_disks = [{
+      interface = "scsi1"
+      size      = 100
+      serial    = "openebs0"                        # → /dev/disk/by-id/…_openebs0
+      backup    = false                             # données répliquées + Velero (§13)
+    }]
   }
-  # k8s-cp-2/3, k8s-worker-2/3 …
+  # k8s-cp-2/3 (sans extra_disks) ; k8s-worker-2/3 : mêmes extra_disks
 }
 ```
+
+> **Les control-planes n'ont volontairement pas de second disque** : ils ne porteront pas le label `openebs.io/engine=mayastor` et n'exécuteront aucun `io-engine` (§8.8). Leur en donner un immobiliserait 100 Go qu'aucun `DiskPool` ne consommerait — et exposerait surtout au risque de créer un pool sur un nœud etcd, dont les fsync ne doivent partager le disque avec rien d'autre.
 
 > **Ordre d'application** : `core` → `data` → `platform` → `k8s`. Les stacks étant indépendantes, la dépendance n'est pas exprimée par OpenTofu mais par cet ordre — les IP étant statiques et planifiées au §3.2, aucune stack n'a besoin de lire l'état d'une autre. C'est délibéré : pas de `terraform_remote_state`, donc pas de couplage entre états.
 
@@ -378,7 +480,101 @@ vms = {
 ### 4.4 Ansible
 
 - Inventaire dynamique Proxmox ou statique généré par `output` OpenTofu.
-- Rôles : `common`, `harden`, puis `coredns_host`, `podman_host`, `k8s_node`, `opensearch_node`, etc.
+- Rôles : `common`, `harden`, puis `coredns_host`, `podman_host`, `k8s_node`, `opensearch_node`, **`openebs_node`** (§8.8), etc.
+
+### 4.5 Évolution du module `proxmox-vm` — disques supplémentaires
+
+Le module ne déclare aujourd'hui qu'un seul bloc `disk`, en dur sur `scsi0`. Les workers ayant besoin d'un second disque brut, il faut lui apprendre à en attacher d'autres. L'extension est conçue pour être **rétrocompatible** : liste vide par défaut, donc aucun `plan` non désiré sur les stacks `proxmox-infra/vms/*` existantes.
+
+**`variables.tf`** — une liste d'objets plutôt qu'un simple nombre, parce que le besoin porte autant sur les *attributs* du disque que sur sa taille :
+
+```hcl
+variable "extra_disks" {
+  description = <<-EOT
+    Disques supplémentaires attachés à la VM, en plus du disque racine scsi0.
+    Chaque entrée produit un disque VIERGE : le module ne le partitionne pas, ne
+    le formate pas et ne le monte pas — c'est la charge hébergée qui en décide
+    (ici : les DiskPool OpenEBS/Mayastor des workers).
+      interface : scsi1, scsi2, … — scsi0 est réservé au disque cloné du template
+      serial    : rend le disque adressable de façon stable via
+                  /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_<serial>
+      backup    : false exclut le disque des sauvegardes Proxmox/PBS
+  EOT
+  type = list(object({
+    interface    = string
+    size         = number
+    serial       = optional(string)
+    datastore_id = optional(string)      # null = var.disk_storage_id
+    discard      = optional(string, "on")
+    ssd          = optional(bool, true)
+    iothread     = optional(bool, true)
+    backup       = optional(bool, true)
+  }))
+  default = []
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : d.interface != "scsi0"])
+    error_message = "scsi0 est réservé au disque racine cloné depuis le template."
+  }
+
+  validation {
+    condition     = length(distinct([for d in var.extra_disks : d.interface])) == length(var.extra_disks)
+    error_message = "Deux disques supplémentaires ne peuvent pas partager la même interface."
+  }
+}
+```
+
+**`main.tf`** — un bloc `dynamic` ajouté après le `disk` existant :
+
+```hcl
+  # Disques supplémentaires. La clé de la map étant l'interface, l'ordre des blocs
+  # générés est déterministe (tri lexicographique) : pas de diff parasite au plan.
+  dynamic "disk" {
+    for_each = { for d in var.extra_disks : d.interface => d }
+    content {
+      datastore_id = coalesce(disk.value.datastore_id, var.disk_storage_id)
+      interface    = disk.key
+      size         = disk.value.size
+      file_format  = "raw"
+      serial       = disk.value.serial
+      discard      = disk.value.discard
+      ssd          = disk.value.ssd
+      iothread     = disk.value.iothread
+      backup       = disk.value.backup
+    }
+  }
+```
+
+**Le `boot_order` n'a pas à changer.** Il vaut déjà `["scsi0"]` : le disque OpenEBS, vierge et sans table de partition, n'est de toute façon pas amorçable, mais l'expliciter évite qu'un BIOS tente de le sonder au démarrage.
+
+**Côté stack**, le champ est ajouté à la `map(object)` des `vms` et transmis tel quel :
+
+```hcl
+# variables.tf de la stack
+extra_disks = optional(list(object({
+  interface    = string
+  size         = number
+  serial       = optional(string)
+  datastore_id = optional(string)
+  backup       = optional(bool, true)
+})), [])
+
+# main.tf de la stack
+module "vm" {
+  # …
+  extra_disks = each.value.extra_disks
+}
+```
+
+**Points de vigilance de cette extension** — les trois vraies difficultés :
+
+| Point | Détail |
+|---|---|
+| **Ajout d'un disque sur une VM clonée** | Le provider `bpg/proxmox` (v0.108.0) apparie les disques par interface. Un `scsi1` absent du template est donc créé, mais c'est le chemin le moins éprouvé du provider : **valider par `tofu test` avec `mock_provider` puis par un `tofu plan` réel** avant de l'appliquer aux trois workers |
+| **La taille n'est réductible que par recréation** | Comme pour `disk_size`, agrandir se fait en place ; réduire impose de détruire la VM. Fixer 100 Go dès le départ, et prévoir plutôt `maxExpansion` côté `DiskPool` (§8.8) |
+| **Nom de périphérique instable** | `/dev/sdb` peut devenir `/dev/sdc` après un redémarrage. C'est exactement ce que le champ `serial` évite : le `DiskPool` référencera `/dev/disk/by-id/…`, jamais `/dev/sdX` (§8.8) |
+
+> **Vérification après le premier `apply`**, avant toute création de pool : `lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT` doit montrer un `sdb` de 100 Go **sans `FSTYPE` ni `MOUNTPOINT`**, et `ls -l /dev/disk/by-id/` doit exposer le lien portant le `serial`. Si `FSTYPE` est renseigné, quelque chose a formaté le disque — ne pas créer le `DiskPool` avant d'avoir compris quoi.
 
 ---
 
@@ -650,7 +846,7 @@ spec:
 | Composant | Rôle | Choix |
 |---|---|---|
 | Exposition | HTTP(S), gRPC | **Gateway API via Cilium** (host network, derrière HAProxy) — §8.4 |
-| Stockage | PV dynamiques | Longhorn, `numberOfReplicas: 2`, trafic de réplication sur `eth1` (§3.3) |
+| Stockage | PV dynamiques | **OpenEBS** — Replicated PV Mayastor (`repl: 2`, NVMe-oF/TCP sur `eth1`) + Local PV hostpath pour l'état chaud — §8.8 |
 | Certificats | TLS auto | cert-manager + `ClusterIssuer` OpenBao |
 | Secrets | Injection | OpenBao Secrets Operator |
 | Policies | Admission | Kyverno (images signées Harbor uniquement) |
@@ -718,6 +914,160 @@ kubectl (kubelogin) ──► kube-apiserver (--oidc-issuer-url=Dex)
 4. **RBAC** : `k8s_admins` → `cluster-admin` ; `k8s_developers` → rôles restreints par namespace.
 
 > Utiliser `email` comme username (lisible dans l'audit), `groups` pour l'autorisation ; le CUID reste l'ancrage LDAP.
+
+### 8.8 Stockage persistant — OpenEBS (Replicated PV Mayastor + Local PV)
+
+**Le choix.** OpenEBS est installé une fois et fournit **deux moteurs** qui répondent à deux besoins qu'il serait coûteux de confondre :
+
+| Moteur | `StorageClass` | Pour quoi | Ce que ça coûte |
+|---|---|---|---|
+| **Replicated PV Mayastor** | `openebs-replicated` | Ce qui **doit survivre à la perte d'un nœud** : Grafana, ArgoCD, applications métier | 2 écritures + un aller-retour NVMe-oF/TCP sur `vmbr1` |
+| **Local PV hostpath** | `openebs-hostpath` | Ce qui est **chaud, volumineux et reconstructible** : TSDB Prometheus (24 h — le long terme vit sur Thanos), caches Tempo, espaces de travail des runners CI | Rien, mais le volume disparaît avec le nœud |
+
+Ce couple est le levier de performance central du plan (§2.7) : sur un backend HDD, éviter la double écriture là où elle n'apporte rien vaut mieux que n'importe quel réglage. La règle de décision est simple — **« si ce volume est perdu, dois-je le reconstruire à la main ? »** Si la réponse est non (Prometheus se re-remplit, Thanos a l'historique), c'est du Local PV.
+
+#### 8.8.1 Prérequis à poser par Ansible (rôle `openebs_node`)
+
+Ce sont les prérequis officiels d'OpenEBS pour Mayastor, confrontés à ce lab :
+
+| Prérequis | Cible du lab | Statut |
+|---|---|---|
+| Kubernetes ≥ 1.23 | kubeadm, version courante (§8.1) | ✅ |
+| Noyau Linux ≥ 5.15 | Rocky Linux 10 (noyau 6.x) | ✅ |
+| CPU x86-64 avec **SSE4.2** | `cpu_type = "x86-64-v3"` imposé par Rocky 10 — v3 inclut SSE4.2 | ✅ acquis |
+| Modules noyau **`nvme-tcp`**, `ext4` (et `xfs`) | À charger et à rendre persistants | **À faire** |
+| **HugePages** : ≥ 2 Go en pages de 2 Mo (**1024 pages**) | 12 Go de RAM par worker (§2.1) | **À faire** |
+| **2 cœurs CPU** par pod `io-engine` | Contrainte relâchée à **1 cœur** via `io_engine.coreList` (§2.7) | **Écart assumé** |
+| ≥ 3 nœuds de stockage | 3 workers, HA dès le départ (§2) | ✅ |
+| Label **`openebs.io/engine=mayastor`** sur les nœuds de stockage | Workers uniquement, jamais les control-planes | **À faire** |
+| Helm ≥ v3.7 | Bastion Ubuntu 24.04 (§4.1) | ✅ |
+| Ports **10124** (gRPC) et **8420/4421** (cibles NVMf) | Sur `vmbr1` entre workers | **À ouvrir** (firewalld) |
+| Paramètre noyau `nvme_core.multipath=Y` | Recommandé pour la HA du chemin de données | **À faire** (grubby + reboot) |
+
+Traduction en tâches Ansible :
+
+```yaml
+# HugePages — 1024 pages de 2 Mo = 2 Go, persistant
+- copy:
+    dest: /etc/sysctl.d/99-openebs-hugepages.conf
+    content: "vm.nr_hugepages = 1024\n"
+  notify: reload sysctl
+
+# Modules noyau, persistants au boot
+- copy:
+    dest: /etc/modules-load.d/openebs.conf
+    content: "nvme_tcp\next4\nxfs\n"
+- community.general.modprobe: { name: nvme_tcp, state: present }
+
+# Multipath NVMe (HA du chemin de données)
+- command: grubby --update-kernel=ALL --args="nvme_core.multipath=Y"
+
+# Ports du plan de données, sur la zone interne uniquement (§3.1)
+- firewalld: { port: "{{ item }}", zone: internal, permanent: true, state: enabled }
+  loop: ["10124/tcp", "8420/tcp", "4421/tcp"]
+```
+
+> ⚠️ **Deux pièges d'ordonnancement, et ils coûtent cher en temps de diagnostic :**
+> 1. **Les HugePages doivent être en place avant que kubelet ne démarre**, sinon le nœud ne publie pas la ressource `hugepages-2Mi` et les pods `io-engine` restent indéfiniment en `Pending` — sans message explicite. Après avoir modifié `vm.nr_hugepages`, **redémarrer kubelet** (le reboot du `nvme_core.multipath` s'en charge : enchaîner les deux tâches dans le même rôle, puis rebooter une fois).
+> 2. **Vérifier l'allocation réelle**, pas la demande : `grep HugePages_Total /proc/meminfo` doit renvoyer 1024. Sur une VM déjà chargée, la mémoire peut être trop fragmentée pour réserver 2 Go de pages contiguës — d'où l'intérêt de poser ce rôle **avant** de déployer quoi que ce soit sur le cluster (§15, phase 4).
+
+#### 8.8.2 Installation
+
+Le chart `openebs/openebs` installe les moteurs par toggles. On ne garde que le nécessaire :
+
+```yaml
+# valeurs Helm — namespace openebs
+engines:
+  local:
+    lvm:    { enabled: false }    # inutile : pas de VG dédié dans les VMs
+    zfs:    { enabled: false }    # inutile : pas de zpool
+  replicated:
+    mayastor: { enabled: true }
+
+mayastor:
+  io_engine:
+    # Un seul réacteur, épinglé sur le 4e vCPU du worker (§2.7).
+    coreList: [3]
+  etcd:
+    # etcd interne à OpenEBS (métadonnées des volumes) — sans rapport avec
+    # l'etcd du cluster (§8.1). 3 réplicas, un par worker.
+    replicaCount: 3
+```
+
+> **L'etcd d'OpenEBS n'est pas celui de Kubernetes.** Il stocke la configuration des volumes répliqués et il est **critique** : le perdre, c'est perdre la carte des répliques, pas les données elles-mêmes. Ses PVC doivent aller sur du **Local PV hostpath** — pas sur Mayastor, qui en dépend (dépendance circulaire au démarrage).
+
+Puis le label des nœuds de stockage :
+
+```bash
+kubectl label node k8s-worker-1 k8s-worker-2 k8s-worker-3 openebs.io/engine=mayastor
+```
+
+#### 8.8.3 Les `DiskPool` — un par worker
+
+C'est ici que le disque `scsi1` du §2.7 entre en jeu. **Une règle domine toutes les autres : ne jamais référencer `/dev/sdX`.** Les noms de périphériques dépendent de l'ordre de découverte au démarrage ; un `scsi1` devenu `/dev/sdc` après un reboot ferait pointer le pool sur un autre disque — et Mayastor **détruit toute donnée préexistante** sur le périphérique qu'on lui confie. Le champ `serial` posé dans OpenTofu (§4.5) existe exactement pour cela.
+
+```yaml
+apiVersion: "openebs.io/v1beta3"
+kind: DiskPool
+metadata:
+  name: pool-worker-1
+  namespace: openebs
+spec:
+  node: k8s-worker-1                                        # = hostname du nœud
+  disks: ["aio:///dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_openebs0"]
+  maxExpansion: "2x"
+```
+
+| Choix | Raison |
+|---|---|
+| **`aio://`** et non `uring://` | Schéma recommandé pour un périphérique non-PCI ; `io_uring` n'apporte rien sur un backend HDD (§2.7) |
+| **`/dev/disk/by-id/…`** | Lien stable au reboot, adossé au `serial` défini dans OpenTofu. `by-path` est l'alternative acceptable |
+| **`maxExpansion: "2x"`** | **Non modifiable après création** — le défaut `1x` interdirait toute croissance. Avec `2x`, agrandir le disque Proxmox de 100 à 200 Go suffira à étendre le pool sans rien recréer |
+| `spec.node` = hostname | Le module cloud-init pose `vm_name` comme hostname (§4.3) : `k8s-worker-1` est donc à la fois la clé de la map OpenTofu, le nom du nœud K8s et la valeur attendue ici |
+
+> Le nom exact du lien `by-id` **doit être relevé sur la VM** (`ls -l /dev/disk/by-id/`) avant d'écrire le manifeste : la forme `scsi-0QEMU_QEMU_HARDDISK_<serial>` est celle produite par un disque SCSI QEMU, mais le préfixe varie selon le contrôleur. C'est la dernière vérification du §4.5.
+
+#### 8.8.4 Les `StorageClass`
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: openebs-replicated
+provisioner: io.openebs.csi-mayastor
+parameters:
+  protocol: nvmf
+  repl: "2"
+  fsType: ext4
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: openebs-hostpath
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: openebs.io/local
+parameters:
+  StorageType: hostpath
+  BasePath: /var/openebs/local
+# Obligatoire pour un volume local : le PV n'existe qu'une fois le pod placé.
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+```
+
+**Aucune des deux n'est déclarée classe par défaut**, et c'est délibéré : sur ce lab, choisir entre « répliqué » et « local » est une décision de conception qui doit rester explicite dans chaque `PersistentVolumeClaim`. Un PVC sans `storageClassName` échouera visiblement plutôt que d'atterrir en silence sur le mauvais moteur — Kyverno (§8.7) peut d'ailleurs refuser les PVC qui n'en précisent pas.
+
+`repl: "2"` sur 3 nœuds est le point d'équilibre du lab : il tolère la perte d'un worker (§2.2) sans payer la triple écriture d'un `repl: 3` sur un backend HDD partagé (§2.6).
+
+#### 8.8.5 Exploitation
+
+- **Le plugin `kubectl mayastor`** est l'outil de diagnostic à installer sur le bastion (§4.1) : `kubectl mayastor get pools`, `get volumes` (états `Online` / `Degraded` / `Faulted`), `get replicas`.
+- **Métriques** : Mayastor expose un exporter Prometheus ; il est scrapé par le `ServiceMonitor` de kube-prometheus-stack (§11.3) et rejoint donc Thanos comme le reste. Les alertes utiles sont peu nombreuses mais indispensables — **pool à plus de 80 %**, **volume en `Degraded` depuis plus de 15 minutes**, **`io-engine` non prêt**.
+- **Rebuild** : au retour d'un worker éteint, la reconstruction des répliques est automatique et sature `vmbr1` le temps qu'elle dure. C'est attendu ; c'est aussi la raison pour laquelle on n'éteint pas deux workers de suite sans vérifier le retour à `Online` (§2.2).
+- **Snapshots et clones** sont disponibles côté Mayastor, mais la sauvegarde de référence reste **Velero** (§13), qui capture le PVC *et* l'objet Kubernetes qui le décrit.
 
 ---
 
@@ -961,7 +1311,7 @@ Authentification Grafana par **OIDC via Dex** (§8.7), RBAC mappé sur les group
 | OpenSearch (heap 4 Go + overhead) | VM `data` | ~7 Go |
 | OTel agents VM (×6) | VMs | 6 × 150 Mo |
 
-Soit ~6,5 Go sur les 30 Go de RAM des workers — ce qui justifie leurs 10 Go chacun (§2) et laisse de la place aux applications.
+Soit ~6,5 Go sur les **30 Go réellement allouables** des workers — 36 Go de RAM au total moins les 6 Go de HugePages réservées à Mayastor (3 × 2 Go, §2.7). C'est ce calcul qui fixe les 12 Go par worker (§2.1), et il laisse ~23 Go aux applications.
 
 ---
 
@@ -975,7 +1325,8 @@ gitops/
 ├── bootstrap/       # app root
 ├── platform/        # cert-manager · gateway (GatewayClass + Gateway + certs) · kyverno
 │                    # otel-operator + collectors · kube-prometheus-stack · thanos
-│                    # tempo · grafana · longhorn · openbao-secrets-operator · dex
+│                    # tempo · grafana · openebs (mayastor + diskpools + SC)
+│                    # openbao-secrets-operator · dex
 └── apps/            # applications métier (chacune livre son HTTPRoute)
 ```
 
@@ -999,7 +1350,8 @@ Dev push ──► GitLab CI :
 | Domaine | Mise en œuvre |
 |---|---|
 | Sauvegarde VMs | Snapshots + Proxmox Backup Server — **`data` en priorité 1** (§2.5) |
-| Sauvegarde K8s | Velero → bucket `velero` sur RustFS |
+| Sauvegarde K8s | Velero → bucket `velero` sur RustFS — **c'est la sauvegarde de référence des PV OpenEBS** (§8.8) |
+| Disques OpenEBS | **Exclus des sauvegardes PBS** (`backup = false`, §4.5) : sauvegarder un pool Mayastor bloc à bloc donnerait une image incohérente et doublerait le volume pour rien. La protection passe par Velero |
 | Bases | Dumps du PostgreSQL unique (bases gitlab + harbor) |
 | OpenBao | Snapshots Raft |
 | LLDAP | Export config/LDIF |
@@ -1009,16 +1361,18 @@ Dev push ──► GitLab CI :
 | Réseau | NetworkPolicies Cilium + Hubble ; services liés à `eth1` uniquement (§3.1) |
 | Secrets | Rotation OpenBao, rien en clair dans Git |
 
-> **Le point faible de ce plan est circulaire** : RustFS héberge les sauvegardes Velero *et* réside sur la VM `data`, elle-même sauvegardée par PBS. Si PBS écrit sur le même stockage physique, une panne disque emporte tout. Le stockage PBS doit donc être sur un **support distinct** de `local-lvm`.
+> **Le point faible de ce plan est circulaire, et la topologie du §2.6 le rend plus aigu** : RustFS héberge les sauvegardes Velero — donc les données des PV OpenEBS — *et* réside sur la VM `data`, elle-même sauvegardée par PBS. Or **toutes** les VMs vivent sur le même HDD 4 To. Une panne de ce disque emporterait simultanément les VMs, les pools Mayastor et le bucket `velero`. La réplication `repl: 2` n'y change rien : elle protège du nœud perdu, pas du disque perdu (§2.6).
+>
+> **Le datastore PBS doit donc impérativement être sur un troisième support** — disque externe USB 3, second disque interne ou NAS. Ce n'est pas une optimisation : sans lui, il n'existe aucune copie des données hors du HDD, et le plan de sauvegarde n'en est pas un. Le SSD système n'est pas un candidat acceptable non plus (une panne y emporterait Proxmox et les sauvegardes ensemble, et sa capacité ne suffirait pas).
 
 ---
 
 ## 14. Ordre de dépendances (résumé)
 
 ```
-Bridges vmbr0 / vmbr1 + template Rocky 10 (9002) + token API Proxmox
-  └─► OpenTofu : stack core → data → platform → k8s   [devsecops-homelab/vms]
-        └─► Ansible (common, harden, node-ip, rp_filter)
+Bridges vmbr0/vmbr1 + local-lvm (HDD 4 To) + template Rocky 10 (9002) + token API Proxmox
+  └─► Module proxmox-vm : var.extra_disks (§4.5) ─► OpenTofu : core → data → platform → k8s
+        └─► Ansible (common, harden, node-ip, rp_filter, openebs_node)
               ├─► CoreDNS (willbrid.lan) + mini-mail        [VM dns]
               ├─► HAProxy L4 (192.168.1.200)                [VM haproxy]
               ├─► LLDAP (uid=CUID v2, script Go) ──────────┐
@@ -1030,7 +1384,9 @@ Bridges vmbr0 / vmbr1 + template Rocky 10 (9002) + token API Proxmox
                     │     ├─► Gateway API en host network  ◄── HAProxy :80/:443
                     │     └─► Cilium Egress Gateway (192.168.1.230)
                     ├─► cert-manager (ClusterIssuer OpenBao) ─► certs du Gateway
-                    ├─► Longhorn (réplication sur eth1)
+                    ├─► OpenEBS  (prérequis nœud : hugepages + nvme-tcp + label)
+                    │     ├─► DiskPool ×3 (scsi1, by-id)
+                    │     └─► SC openebs-replicated (repl 2) + openebs-hostpath
                     ├─► Dex (OIDC↔LDAP) ─► authn users K8s
                     ├─► OTel Operator ─► agents + gateway
                     │     ├─► Prometheus (OTLP) ─► Thanos ─► RustFS
@@ -1050,14 +1406,20 @@ Bridges vmbr0 / vmbr1 + template Rocky 10 (9002) + token API Proxmox
 ### Phase 0 — Préparation
 - [ ] Installer sur Ubuntu 24.04 : OpenTofu, Ansible, kubectl, helm, cmctl, `bao`, cosign, kubelogin, toolchain Go.
 - [ ] Créer le bridge **`vmbr1`** sur Proxmox (`bridge-ports none`, aucune IP hôte) — §3.4.
-- [ ] Vérifier que le template **`rocky-linux-10-template` (vm_id 9002)** existe (stack `proxmox-infra/templates`).
+- [ ] **Stockage** (§2.6) : vérifier que le thin pool **`local-lvm` est bien adossé au HDD 4 To**, que le SSD ne porte que Proxmox et son stockage `local`, et que `local` accepte le contenu **`snippets`** (requis par le module pour `user-data`/`network-data`).
+- [ ] Poser une **alerte de remplissage du thin pool à 75 %** (`lvs -o lv_name,data_percent`) — un pool saturé met en erreur d'écriture toutes les VMs à la fois.
+- [x] **Inventaire CPU vérifié** : 16 cœurs / 32 threads, aucun cœur désactivé au BIOS, aucun bridage noyau, `x86-64-v3` et `sse4_2` confirmés (§2).
+- [x] Vérifier que le template **`rocky-linux-10-template` (vm_id 9002)** existe — présent sur le nœud `pve`.
+- [ ] **Figer le plan de `vmid` des 12 VMs** : les identifiants **101 et 201 sont déjà pris** (`ubuntu-web-01`, `rocky9-app-01`) — vérifier l'absence de collision avant le premier `apply`.
 - [ ] Créer le token API Proxmox restreint (rôle dédié, pas `root@pam`).
 - [ ] Figer le plan d'adressage §3.2 et **réserver la plage `192.168.1.200-230` dans le DHCP du routeur**.
 - [ ] Activer **KSM** sur l'hôte, régler le ballooning selon §2.3.
 
 ### Phase 1 — IaC & socle
-- [ ] Écrire les stacks `devsecops-homelab/vms/{core,data,platform,k8s}` sur le modèle de `proxmox-infra/vms` (§4.3).
+- [ ] **Étendre le module `proxmox-vm` avec `var.extra_disks`** (§4.5) ; `tofu test` sur les stacks `proxmox-infra/vms/*` existantes pour confirmer l'absence de diff (rétrocompatibilité).
+- [ ] Écrire les stacks `devsecops-homelab/vms/{core,data,platform,k8s}` sur le modèle de `proxmox-infra/vms` (§4.3), avec `disk_storage_id = "local-lvm"`.
 - [ ] `tofu test` sur chaque stack (mock provider), puis `tofu apply` dans l'ordre `core` → `data` → `platform` → `k8s`.
+- [ ] **Vérifier le second disque des workers** avant toute suite : `lsblk` doit montrer un disque de 100 Go **sans `FSTYPE` ni `MOUNTPOINT`**, et relever le lien exact sous `/dev/disk/by-id/` (§4.5).
 - [ ] Rôles Ansible `common` + `harden` ; sysctl `rp_filter=0`, liaison des services sur `eth1` (§3.1).
 - [ ] Déployer **CoreDNS** (zone `willbrid.lan`, vue interne/LAN, forward upstream) + **mini-serveur mail** (MX/A).
 - [ ] Déployer **HAProxy** (frontends `:6443` et `:80/:443`, backends en `mode tcp`) — §8.3.
@@ -1077,18 +1439,22 @@ Bridges vmbr0 / vmbr1 + template Rocky 10 (9002) + token API Proxmox
 
 ### Phase 4 — Kubernetes
 - [ ] Préparer les nœuds (containerd, swap off, sysctl, SELinux, `--node-ip` interne).
+- [ ] **Rôle Ansible `openebs_node` sur les 3 workers** — HugePages (`vm.nr_hugepages = 1024`), modules `nvme_tcp`/`ext4`/`xfs`, `nvme_core.multipath=Y`, ports 10124 et 8420/4421 sur la zone interne, **puis un reboot** ; contrôler `grep HugePages_Total /proc/meminfo` = 1024 (§8.8.1).
 - [ ] Installer les **CRD Gateway API** (*standard channel*) — **avant** Cilium.
 - [ ] `kubeadm init` sur cp-1 via `ClusterConfiguration` (`controlPlaneEndpoint` HAProxy, `advertiseAddress` interne, `certSANs`, OIDC, skip kube-proxy).
 - [ ] Installer **Cilium** : `kubeProxyReplacement`, `devices=eth1`, `l7Proxy`, `gatewayAPI` en host network, Hubble.
 - [ ] Joindre **cp-2, cp-3** puis **worker-1/2/3** (HA d'emblée).
 - [ ] **Cilium Egress Gateway** : label `egress-node`, IP `192.168.1.230`, `excludedCIDRs` internes.
-- [ ] cert-manager + `ClusterIssuer` OpenBao ; créer le `Gateway` `apps` et son certificat wildcard ; Longhorn (`numberOfReplicas: 2`, `storageNetwork` sur `eth1`).
+- [ ] cert-manager + `ClusterIssuer` OpenBao ; créer le `Gateway` `apps` et son certificat wildcard.
+- [ ] **OpenEBS** (§8.8) : label `openebs.io/engine=mayastor` sur les workers ; chart avec `io_engine.coreList: [3]`, moteurs LVM/ZFS désactivés, etcd interne sur Local PV ; **3 `DiskPool`** référençant `aio:///dev/disk/by-id/…` (jamais `/dev/sdX`) avec `maxExpansion: "2x"` ; les 2 `StorageClass` `openebs-replicated` et `openebs-hostpath`, **aucune en classe par défaut**.
+- [ ] Valider le stockage de bout en bout : `kubectl mayastor get pools` (3 pools `Online`), puis un PVC de test sur chaque `StorageClass`, et vérifier qu'un rebuild se déclenche et se termine après l'arrêt/redémarrage d'un worker.
 - [ ] Dex (connecteur LDAP) + kubelogin ; RBAC mappé sur les groupes LDAP.
 - [ ] OpenBao Secrets Operator.
 
 ### Phase 5 — Observabilité
 - [ ] **OTel Operator**, puis les 3 collectors : agent (DaemonSet), cluster (**1 réplica strict**), gateway (2 réplicas).
-- [ ] **Prometheus** avec `--web.enable-otlp-receiver`, rétention 24 h, blocs de 2 h ; Alertmanager → mail interne.
+- [ ] **Prometheus** avec `--web.enable-otlp-receiver`, rétention 24 h, blocs de 2 h, **PVC sur `openebs-hostpath`** (§8.8) ; Alertmanager → mail interne.
+- [ ] Alertes stockage : pool OpenEBS > 80 %, volume `Degraded` > 15 min, `io-engine` non prêt, thin pool LVM > 75 % côté hôte.
 - [ ] **Thanos** : sidecar, Store Gateway, Query, Compactor (downsampling) sur le bucket `thanos`.
 - [ ] **Tempo** monolithique sur le bucket `tempo`.
 - [ ] Export des logs vers **OpenSearch** (exporter `opensearch`, bascule Data Prepper si besoin).
@@ -1108,7 +1474,7 @@ Bridges vmbr0 / vmbr1 + template Rocky 10 (9002) + token API Proxmox
 - [ ] Kyverno : images signées Harbor uniquement, pas de `latest`, non-root, contrôle des `HTTPRoute` autorisées.
 
 ### Phase 8 — Sauvegarde & résilience
-- [ ] Proxmox Backup Server sur un **support distinct de `local-lvm`** ; `data` en priorité 1.
+- [ ] Proxmox Backup Server sur un **troisième support physique** — ni le HDD 4 To (qui porte toutes les VMs), ni le SSD système (§13). `data` en priorité 1.
 - [ ] Velero → bucket `velero` ; dumps PostgreSQL ; snapshots Raft OpenBao ; snapshots OpenSearch **hors** VM `data`.
 - [ ] Tester une **restauration** (c'est la seule façon de savoir si le plan fonctionne).
 - [ ] Ajouter `haproxy-2` + keepalived si le SPOF de la §8.3 devient gênant.
@@ -1240,6 +1606,15 @@ Questions typiques : « pourquoi le trafic etcd passe-t-il par `eth1` ? », « q
 | **VM `haproxy` = SPOF d'accès au lab** | VM sans état, reconstruite par `tofu apply` + Ansible ; `haproxy-2` + keepalived en phase 8 (§8.3) |
 | **VM `data` = logs + objet + sauvegardes** | Priorité 1 du plan PBS ; snapshots OpenSearch écrits **hors** de son propre RustFS (§2.5, §13) |
 | **Perte de quorum etcd** | Ne jamais éteindre plus d'**un** control-plane — le piège de l'extinction sélective (§2.2) |
+| **HDD 4 To = SPOF de tout le lab** | Toutes les VMs, les 3 pools Mayastor et le bucket `velero` partagent un seul disque physique. `repl: 2` protège du nœud perdu, **pas** du disque perdu : la seule vraie mitigation est un **datastore PBS sur un troisième support** (§13) |
+| **Thin pool `local-lvm` saturé** | Incident le plus brutal possible : erreurs d'écriture sur **toutes** les VMs simultanément. Alerte à 75 %, `discard=on` déjà actif, surveiller `data_percent` **et** `metadata_percent` (§2.6) |
+| **HugePages absentes → `io-engine` en `Pending`** | Symptôme muet et coûteux à diagnostiquer. Poser le rôle `openebs_node` **avant** tout déploiement, rebooter, et contrôler `HugePages_Total = 1024` (§8.8.1) |
+| **`DiskPool` pointé sur `/dev/sdX`** | Un renommage au reboot ferait écraser un autre disque — Mayastor détruit toute donnée préexistante. **Toujours `/dev/disk/by-id/`**, adossé au `serial` défini dans OpenTofu (§4.5, §8.8.3) |
+| **1 thread par worker consommé à 100 %** | Poll mode SPDK : 3 threads immobilisés en permanence sur 32, adossés à 16 cœurs physiques — jusqu'à 19 % de la machine. `io_engine.coreList` limité à un seul cœur ; deux réacteurs ne doivent pas partager un cœur physique (threads `N`/`N+16`) ; mode interruption à surveiller en amont (§2.7) |
+| **CPU = ressource rare, pas la RAM** | 29 vCPU sur 32 threads (90 %) contre 86 Go sur 128 (67 %). Toute extension s'arbitre en vCPU d'abord ; il ne reste que 3 threads, et ils sont la réserve de l'hyperviseur (§2.1, §2.4) |
+| **Mayastor sur backend HDD** | Chemin de données conçu pour du NVMe. Mitigé par `aio://`, `repl: 2` (pas 3), et surtout par le renvoi de l'état chaud vers `openebs-hostpath` (§8.8) |
+| **Ajout d'un disque à une VM clonée** | Chemin peu éprouvé du provider `bpg/proxmox` : valider par `tofu test` puis `tofu plan` réel avant d'appliquer aux 3 workers (§4.5) |
+| **Rocky 10 hors matrice OpenEBS** | La documentation valide Ubuntu et RHEL 8.8. Rocky 10 satisfait tous les prérequis techniques (noyau, SSE4.2, `nvme-tcp`) mais reste à valider en pratique — c'est le premier test de la phase 4 |
 | CoreDNS `dns` = SPOF PKI/exposition | Résolveur secondaire ou restore rapide ; snapshot VM |
 | Mail sortant externe non fiable | Réserver au trafic interne ; relais tiers si envoi externe |
 | OpenSearch JVM gourmande | Heap 4 Go, swap off, `memory_lock`, ISM sur tous les index |
@@ -1258,7 +1633,8 @@ Questions typiques : « pourquoi le trafic etcd passe-t-il par `eth1` ? », « q
 
 | Couche | Technologie |
 |---|---|
-| Hyperviseur | Proxmox VE 9.1.1 — 36 cores / 128 Go, **32 vCPU alloués** |
+| Hyperviseur | Proxmox VE 9.1.1 — 2 × Xeon E5-2640 v3, **16 cœurs / 32 threads**, 128 Go, 2 nœuds NUMA — **29 vCPU / 86 Go alloués** |
+| Stockage hôte | **SSD 1 To** : Proxmox + stockage `local` (ISO, template, snippets) — **HDD 4 To** : `local-lvm`, tous les disques de VM (~1,53 To provisionné) |
 | OS VMs | Rocky Linux 10 (template `9002` de `proxmox-infra/templates`) |
 | Poste admin | Ubuntu 24.04 (OpenTofu + Ansible) |
 | Domaine interne | `willbrid.lan` |
@@ -1278,7 +1654,7 @@ Questions typiques : « pourquoi le trafic etcd passe-t-il par `eth1` ? », « q
 | Entrée du lab | **VM HAProxy dédiée** (`192.168.1.200`, L4 passthrough) — keepalived reporté |
 | Exposition des applications | **Gateway API** (`gateway.networking.k8s.io/v1`) via **Cilium**, host network mode |
 | Sortie cluster | **Cilium Egress Gateway** — IP unique `192.168.1.230` |
-| Stockage K8s | Longhorn (`numberOfReplicas: 2`, réplication sur `eth1`) |
+| Stockage bloc K8s | **OpenEBS** — Replicated PV **Mayastor** (`repl: 2`, NVMe-oF/TCP sur `eth1`, 1 `DiskPool` de 100 Go par worker) + **Local PV hostpath** pour l'état chaud |
 | Stockage objet | **RustFS** (Apache 2.0, S3) — buckets `thanos`, `tempo`, `velero` |
 | Certificats K8s | cert-manager (`ClusterIssuer` OpenBao) |
 | Authn users K8s | Dex (OIDC) ↔ LLDAP + kubelogin |
