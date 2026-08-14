@@ -63,6 +63,91 @@ variable "disk_size" {
   default     = 30
 }
 
+variable "extra_disks" {
+  description = <<-EOT
+    Disques supplémentaires attachés à la VM, en plus du disque racine scsi0.
+    Chaque entrée produit un disque VIERGE : le module ne le partitionne pas, ne
+    le formate pas et ne le monte pas — c'est la charge hébergée qui en décide
+    (ici : les DiskPool OpenEBS/Mayastor des workers).
+
+      interface   : scsi1 … scsi30 — scsi0 est réservé au disque cloné du template.
+                    Le bus est volontairement restreint à scsi : le provider relit
+                    les disques triés par interface, et un bus qui trie avant
+                    « scsi0 » (ide, sata) décalerait la liste en état, produisant
+                    un diff permanent au plan.
+      size        : en Go. Agrandir se fait en place ; RÉDUIRE impose de détruire
+                    puis recréer la VM — dimensionner large dès le départ.
+      serial      : rend le disque adressable de façon stable via
+                    /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_<serial>, alors que
+                    /dev/sdX peut changer d'un redémarrage à l'autre.
+                    Voir l'output extra_disk_device_paths.
+      file_format : null (défaut) = laisse Proxmox choisir selon le stockage
+                    (raw imposé sur LVM/ZFS, qcow2 sur un stockage répertoire).
+      backup      : false exclut le disque des sauvegardes Proxmox/PBS.
+      replicate   : false exclut le disque de la réplication ZFS entre nœuds.
+
+    Si le template cloné porte lui-même des disques supplémentaires, le clone en
+    hérite : ils doivent être redéclarés ici (interface identique, taille >= celle
+    du template), faute de quoi le provider planifiera leur suppression.
+  EOT
+  type = list(object({
+    interface    = string
+    size         = number
+    serial       = optional(string)
+    datastore_id = optional(string) # null = var.disk_storage_id
+    file_format  = optional(string) # null = choix du stockage Proxmox
+    discard      = optional(string, "on")
+    ssd          = optional(bool, true)
+    iothread     = optional(bool, true)
+    backup       = optional(bool, true)
+    replicate    = optional(bool, true)
+  }))
+  default  = []
+  nullable = false
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : d.interface != "scsi0"])
+    error_message = "scsi0 est réservé au disque racine cloné depuis le template."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : can(regex("^scsi([1-9]|[12][0-9]|30)$", d.interface))])
+    error_message = "interface doit être scsi1 … scsi30 : le bus scsi est le seul supporté ici (scsi_hardware = virtio-scsi-single)."
+  }
+
+  validation {
+    condition     = length(distinct([for d in var.extra_disks : d.interface])) == length(var.extra_disks)
+    error_message = "Deux disques supplémentaires ne peuvent pas partager la même interface."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : d.size > 0])
+    error_message = "La taille d'un disque supplémentaire doit être strictement positive (en Go)."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : d.serial == null || can(regex("^[A-Za-z0-9._-]{1,20}$", d.serial))])
+    error_message = "serial : 20 caractères maximum parmi [A-Za-z0-9._-] (limite QEMU)."
+  }
+
+  validation {
+    condition = length(compact([for d in var.extra_disks : d.serial == null ? "" : d.serial])) == length(
+      distinct(compact([for d in var.extra_disks : d.serial == null ? "" : d.serial]))
+    )
+    error_message = "Deux disques d'une même VM ne peuvent pas partager le même serial : /dev/disk/by-id ne serait plus déterministe."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : contains(["on", "ignore"], d.discard)])
+    error_message = "discard doit valoir 'on' ou 'ignore'."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : d.file_format == null || contains(["raw", "qcow2", "vmdk"], coalesce(d.file_format, "raw"))])
+    error_message = "file_format doit être 'raw', 'qcow2', 'vmdk' ou null (choix laissé au stockage Proxmox)."
+  }
+}
+
 # ── CPU ───────────────────────────────────────────────────────────────────────
 
 variable "cpu_cores" {

@@ -8,6 +8,7 @@ locals {
     image_filename  = "noble-server-cloudimg-amd64-agent.img"
     disk_size       = var.ubuntu_2404_disk_size
     disk_format     = "raw"
+    extra_disks     = var.ubuntu_2404_extra_disks
     cloud_init_user = "ubuntu"
     os_type         = "l26"
     cpu_type        = var.cpu_type
@@ -22,6 +23,7 @@ locals {
     image_filename  = "Rocky-9-GenericCloud-Base.latest.x86_64-agent.img"
     disk_size       = var.rocky_9_disk_size
     disk_format     = "raw"
+    extra_disks     = var.rocky_9_extra_disks
     cloud_init_user = "rocky"
     os_type         = "l26"
     # Rocky Linux 9 est compilé pour x86-64-v2 : le défaut de la stack convient.
@@ -37,6 +39,7 @@ locals {
     image_filename  = "Rocky-10-GenericCloud-Base.latest.x86_64-agent.img"
     disk_size       = var.rocky_10_disk_size
     disk_format     = "raw"
+    extra_disks     = var.rocky_10_extra_disks
     cloud_init_user = "rocky"
     os_type         = "l26"
     # Rocky Linux 10 (comme RHEL 10) est compilé pour x86-64-v3 : sa glibc refuse
@@ -62,6 +65,7 @@ module "ubuntu_2404_template" {
   disk_storage_id = var.disk_storage_id
   disk_size       = local.ubuntu_2404.disk_size
   disk_format     = local.ubuntu_2404.disk_format
+  extra_disks     = local.ubuntu_2404.extra_disks
 
   cpu_cores          = var.cpu_cores
   cpu_type           = local.ubuntu_2404.cpu_type
@@ -94,6 +98,7 @@ module "rocky_linux_9_template" {
   disk_storage_id = var.disk_storage_id
   disk_size       = local.rocky_linux_9.disk_size
   disk_format     = local.rocky_linux_9.disk_format
+  extra_disks     = local.rocky_linux_9.extra_disks
 
   cpu_cores          = var.cpu_cores
   cpu_type           = local.rocky_linux_9.cpu_type
@@ -126,6 +131,7 @@ module "rocky_linux_10_template" {
   disk_storage_id = var.disk_storage_id
   disk_size       = local.rocky_linux_10.disk_size
   disk_format     = local.rocky_linux_10.disk_format
+  extra_disks     = local.rocky_linux_10.extra_disks
 
   cpu_cores          = var.cpu_cores
   cpu_type           = local.rocky_linux_10.cpu_type

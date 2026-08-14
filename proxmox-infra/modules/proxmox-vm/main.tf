@@ -102,6 +102,28 @@ resource "proxmox_virtual_environment_vm" "vm" {
     iothread     = true
   }
 
+  # Disques supplémentaires, vierges (aucun file_id : Proxmox alloue un volume neuf).
+  # La clé de la map étant l'interface, les blocs sont générés dans l'ordre
+  # lexicographique — le même que celui appliqué par le provider à la relecture de
+  # l'état, où les disques sont triés par interface. Les entrées restant toutes
+  # postérieures à « scsi0 » (validation sur var.extra_disks), l'ordre config et
+  # l'ordre état coïncident : pas de diff parasite au plan.
+  dynamic "disk" {
+    for_each = { for d in var.extra_disks : d.interface => d }
+    content {
+      datastore_id = coalesce(disk.value.datastore_id, var.disk_storage_id)
+      interface    = disk.key
+      size         = disk.value.size
+      file_format  = disk.value.file_format
+      serial       = disk.value.serial
+      discard      = disk.value.discard
+      ssd          = disk.value.ssd
+      iothread     = disk.value.iothread
+      backup       = disk.value.backup
+      replicate    = disk.value.replicate
+    }
+  }
+
   network_device {
     bridge   = var.network_bridge_primary
     model    = var.network_model
@@ -155,7 +177,11 @@ resource "proxmox_virtual_environment_vm" "vm" {
   }
 
   scsi_hardware = "virtio-scsi-single"
-  boot_order    = ["scsi0"]
+
+  # Volontairement limité au disque racine : les disques de var.extra_disks sont
+  # vierges, donc non amorçables. L'expliciter évite que le BIOS les sonde au
+  # démarrage et allonge le boot.
+  boot_order = ["scsi0"]
 
   depends_on = [
     proxmox_virtual_environment_file.user_data,

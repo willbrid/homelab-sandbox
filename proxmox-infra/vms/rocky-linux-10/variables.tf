@@ -237,5 +237,21 @@ variable "vms" {
     started = optional(bool, true)
     # Délai d'arrêt propre spécifique à cette VM. null = var.timeout_shutdown_vm.
     timeout_shutdown_vm = optional(number)
+    # Disques supplémentaires (scsi1 …) attachés en plus du disque racine, et
+    # laissés VIERGES : ni partitionnés, ni formatés, ni montés — c'est la charge
+    # hébergée qui en décide. Contraintes, valeurs par défaut et validations :
+    # var.extra_disks du module proxmox-vm.
+    extra_disks = optional(list(object({
+      interface    = string
+      size         = number
+      serial       = optional(string)
+      datastore_id = optional(string)
+      file_format  = optional(string)
+      discard      = optional(string, "on")
+      ssd          = optional(bool, true)
+      iothread     = optional(bool, true)
+      backup       = optional(bool, true)
+      replicate    = optional(bool, true)
+    })), [])
   }))
 }

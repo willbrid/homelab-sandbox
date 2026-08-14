@@ -126,6 +126,73 @@ variable "qemu_agent_enabled" {
   default     = true
 }
 
+# ── Disques supplémentaires des templates ─────────────────────────────────────
+#
+# Un disque déclaré ici est porté par le TEMPLATE : toute VM clonée en hérite, et
+# doit le redéclarer à l'identique dans var.extra_disks du module proxmox-vm —
+# sinon le provider planifiera sa suppression sur le clone. Pour un disque propre
+# à certaines VMs seulement (disque OpenEBS des workers, par exemple), passer par
+# le champ extra_disks de var.vms des stacks proxmox-infra/vms/*, pas par ici.
+#
+# Le contrat complet (attributs, valeurs par défaut, validations) est porté par
+# var.extra_disks du module proxmox-vm-template : interface scsi1…scsi30, disque
+# laissé VIERGE (ni partitionné, ni formaté, ni monté), serial ≤ 20 caractères
+# rendant le disque adressable via /dev/disk/by-id, file_format null = var.disk_format.
+
+variable "ubuntu_2404_extra_disks" {
+  description = "Disques supplémentaires du template Ubuntu 24.04. Hérités par tous ses clones."
+  type = list(object({
+    interface    = string
+    size         = number
+    serial       = optional(string)
+    datastore_id = optional(string)
+    file_format  = optional(string)
+    discard      = optional(string, "on")
+    ssd          = optional(bool, true)
+    iothread     = optional(bool, true)
+    backup       = optional(bool, true)
+    replicate    = optional(bool, true)
+  }))
+  default  = []
+  nullable = false
+}
+
+variable "rocky_9_extra_disks" {
+  description = "Disques supplémentaires du template Rocky Linux 9. Hérités par tous ses clones."
+  type = list(object({
+    interface    = string
+    size         = number
+    serial       = optional(string)
+    datastore_id = optional(string)
+    file_format  = optional(string)
+    discard      = optional(string, "on")
+    ssd          = optional(bool, true)
+    iothread     = optional(bool, true)
+    backup       = optional(bool, true)
+    replicate    = optional(bool, true)
+  }))
+  default  = []
+  nullable = false
+}
+
+variable "rocky_10_extra_disks" {
+  description = "Disques supplémentaires du template Rocky Linux 10. Hérités par tous ses clones."
+  type = list(object({
+    interface    = string
+    size         = number
+    serial       = optional(string)
+    datastore_id = optional(string)
+    file_format  = optional(string)
+    discard      = optional(string, "on")
+    ssd          = optional(bool, true)
+    iothread     = optional(bool, true)
+    backup       = optional(bool, true)
+    replicate    = optional(bool, true)
+  }))
+  default  = []
+  nullable = false
+}
+
 # ── Ubuntu 24.04 ──────────────────────────────────────────────────────────────
 
 variable "ubuntu_2404_vm_id" {

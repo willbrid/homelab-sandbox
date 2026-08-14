@@ -64,6 +64,88 @@ variable "disk_format" {
   }
 }
 
+variable "extra_disks" {
+  description = <<-EOT
+    Disques supplémentaires attachés au template, en plus du disque racine scsi0
+    importé depuis l'image cloud. Chaque entrée produit un disque VIERGE : ni
+    partitionné, ni formaté, ni monté.
+
+    ATTENTION — portée : tout clone du template hérite de ces disques. Ne les
+    déclarer ici que si TOUTES les VMs issues du template doivent les porter ;
+    pour un besoin propre à certaines VMs (disque OpenEBS des workers, par
+    exemple), utiliser var.extra_disks du module proxmox-vm. Un disque déclaré
+    ici doit être redéclaré à l'identique côté proxmox-vm — sinon le provider
+    planifiera sa suppression sur le clone.
+
+      interface   : scsi1 … scsi30 — scsi0 est réservé au disque racine importé.
+                    Le bus est restreint à scsi : le provider relit les disques
+                    triés par interface, et un bus qui trie avant « scsi0 »
+                    (ide, sata) produirait un diff permanent au plan.
+      size        : en Go. Agrandir se fait en place ; réduire impose de recréer.
+      serial      : rend le disque adressable via
+                    /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_<serial>
+      file_format : null (défaut) = var.disk_format
+      backup      : false exclut le disque des sauvegardes Proxmox/PBS
+      replicate   : false exclut le disque de la réplication ZFS entre nœuds
+  EOT
+  type = list(object({
+    interface    = string
+    size         = number
+    serial       = optional(string)
+    datastore_id = optional(string) # null = var.disk_storage_id
+    file_format  = optional(string) # null = var.disk_format
+    discard      = optional(string, "on")
+    ssd          = optional(bool, true)
+    iothread     = optional(bool, true)
+    backup       = optional(bool, true)
+    replicate    = optional(bool, true)
+  }))
+  default  = []
+  nullable = false
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : d.interface != "scsi0"])
+    error_message = "scsi0 est réservé au disque racine importé depuis l'image cloud."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : can(regex("^scsi([1-9]|[12][0-9]|30)$", d.interface))])
+    error_message = "interface doit être scsi1 … scsi30 : le bus scsi est le seul supporté ici (scsi_hardware = virtio-scsi-single)."
+  }
+
+  validation {
+    condition     = length(distinct([for d in var.extra_disks : d.interface])) == length(var.extra_disks)
+    error_message = "Deux disques supplémentaires ne peuvent pas partager la même interface."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : d.size > 0])
+    error_message = "La taille d'un disque supplémentaire doit être strictement positive (en Go)."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : d.serial == null || can(regex("^[A-Za-z0-9._-]{1,20}$", d.serial))])
+    error_message = "serial : 20 caractères maximum parmi [A-Za-z0-9._-] (limite QEMU)."
+  }
+
+  validation {
+    condition = length(compact([for d in var.extra_disks : d.serial == null ? "" : d.serial])) == length(
+      distinct(compact([for d in var.extra_disks : d.serial == null ? "" : d.serial]))
+    )
+    error_message = "Deux disques d'un même template ne peuvent pas partager le même serial : /dev/disk/by-id ne serait plus déterministe."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : contains(["on", "ignore"], d.discard)])
+    error_message = "discard doit valoir 'on' ou 'ignore'."
+  }
+
+  validation {
+    condition     = alltrue([for d in var.extra_disks : d.file_format == null || contains(["raw", "qcow2", "vmdk"], coalesce(d.file_format, "raw"))])
+    error_message = "file_format doit être 'raw', 'qcow2', 'vmdk' ou null (= var.disk_format)."
+  }
+}
+
 # ── CPU ───────────────────────────────────────────────────────────────────────
 
 variable "cpu_cores" {

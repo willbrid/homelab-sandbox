@@ -155,3 +155,77 @@ run "vlan_tagging_optional" {
     error_message = "Le template doit être planifié correctement avec les VLANs configurés."
   }
 }
+
+# ── Test 6 : disques supplémentaires des templates ───────────────────────────
+
+# Rétrocompatibilité : sans variable renseignée, aucun template ne porte de
+# disque supplémentaire — les clones existants restent inchangés.
+run "templates_sans_extra_disks_par_defaut" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      length(module.ubuntu_2404_template.extra_disk_interfaces) == 0,
+      length(module.rocky_linux_9_template.extra_disk_interfaces) == 0,
+      length(module.rocky_linux_10_template.extra_disk_interfaces) == 0,
+    ])
+    error_message = "Par défaut, aucun template ne doit porter de disque supplémentaire."
+  }
+}
+
+# Un disque déclaré sur un template ne doit atteindre que celui-ci : chaque
+# variable *_extra_disks est câblée sur son propre appel de module.
+run "extra_disks_isoles_par_template" {
+  command = plan
+
+  variables {
+    rocky_10_extra_disks = [{
+      interface = "scsi1"
+      size      = 50
+      serial    = "data0"
+      backup    = false
+    }]
+  }
+
+  assert {
+    condition     = module.rocky_linux_10_template.extra_disk_interfaces == tolist(["scsi1"])
+    error_message = "Le disque supplémentaire doit être porté par le template Rocky Linux 10."
+  }
+
+  assert {
+    condition = alltrue([
+      length(module.ubuntu_2404_template.extra_disk_interfaces) == 0,
+      length(module.rocky_linux_9_template.extra_disk_interfaces) == 0,
+    ])
+    error_message = "Un disque déclaré sur un template ne doit pas atteindre les autres templates."
+  }
+
+  assert {
+    condition     = output.rocky_linux_10_template.extra_disk_interfaces == tolist(["scsi1"])
+    error_message = "Les interfaces héritées par les clones doivent remonter dans l'output de la stack."
+  }
+}
+
+# Plusieurs templates peuvent porter un disque simultanément, chacun le sien.
+run "extra_disks_sur_plusieurs_templates" {
+  command = plan
+
+  variables {
+    ubuntu_2404_extra_disks = [{ interface = "scsi1", size = 30, serial = "data0" }]
+    rocky_10_extra_disks = [
+      { interface = "scsi2", size = 100, serial = "data1" },
+      { interface = "scsi1", size = 50, serial = "data0" },
+    ]
+  }
+
+  assert {
+    condition     = module.ubuntu_2404_template.extra_disk_interfaces == tolist(["scsi1"])
+    error_message = "Le template Ubuntu doit porter son unique disque supplémentaire."
+  }
+
+  # L'output est trié : c'est l'ordre dans lequel le provider relit les disques.
+  assert {
+    condition     = module.rocky_linux_10_template.extra_disk_interfaces == tolist(["scsi1", "scsi2"])
+    error_message = "Les interfaces doivent être exposées triées, quel que soit l'ordre de déclaration."
+  }
+}

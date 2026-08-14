@@ -41,3 +41,22 @@ rocky_9_disk_size = 20
 
 rocky_10_vm_id    = 9002
 rocky_10_disk_size = 20
+
+# ── Disques supplémentaires des templates ─────────────────────────────────────
+# Un disque déclaré ici est porté par le TEMPLATE : toutes les VMs qui en seront
+# clonées l'hériteront, et devront le redéclarer à l'identique dans le champ
+# extra_disks de var.vms (stacks proxmox-infra/vms/*) — sinon le provider
+# planifiera sa suppression sur le clone. Pour un disque propre à quelques VMs
+# seulement, le déclarer côté stack VM plutôt qu'ici.
+#
+# Le disque est laissé VIERGE : ni partitionné, ni formaté, ni monté.
+# scsi0 est réservé au disque racine importé depuis l'image cloud.
+#
+# rocky_10_extra_disks = [
+#   {
+#     interface = "scsi1"
+#     size      = 50          # Go — agrandir se fait en place, réduire impose de recréer
+#     serial    = "data0"     # → /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_data0
+#     backup    = false       # exclut le disque des sauvegardes Proxmox/PBS
+#   },
+# ]

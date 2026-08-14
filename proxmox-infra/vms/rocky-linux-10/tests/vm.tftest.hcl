@@ -138,3 +138,98 @@ run "rocky10_vm_stopped_via_stopped_vms" {
     error_message = "Une VM absente de stopped_vms doit rester démarrée."
   }
 }
+
+# ── Test : disques supplémentaires (var.extra_disks) ──────────────────────────
+
+run "rocky10_vm_extra_disks" {
+  command = plan
+
+  variables {
+    vms = {
+      "rocky10-data-01" = {
+        vm_id     = 301
+        disk_size = 80
+        # scsi1 vierge : ni partitionné, ni formaté, ni monté par le module.
+        extra_disks = [{
+          interface = "scsi1"
+          size      = 50
+          serial    = "data0"
+          backup    = false
+        }]
+      }
+      "rocky10-plain-01" = {
+        vm_id = 302
+      }
+    }
+  }
+
+  assert {
+    condition     = module.vm["rocky10-data-01"].extra_disk_device_paths["scsi1"] == "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_data0"
+    error_message = "Le disque supplémentaire doit être adressable par son serial, jamais par /dev/sdX."
+  }
+
+  assert {
+    condition     = output.vms["rocky10-data-01"].extra_disk_device_paths["scsi1"] == "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_data0"
+    error_message = "Le chemin stable doit remonter dans l'output de la stack (consommé par Ansible)."
+  }
+
+  # Rétrocompatibilité : une VM sans extra_disks garde son seul disque racine.
+  assert {
+    condition     = length(output.vms["rocky10-plain-01"].extra_disk_device_paths) == 0
+    error_message = "Sans extra_disks, aucun disque supplémentaire ne doit être exposé."
+  }
+}
+
+# Deux VMs peuvent porter le même serial : /dev/disk/by-id est un espace de noms
+# local à chaque invité. L'unicité n'est requise qu'au sein d'une même VM.
+run "rocky10_vm_extra_disks_serial_partage_entre_vms" {
+  command = plan
+
+  variables {
+    vms = {
+      "rocky10-data-01" = {
+        vm_id       = 301
+        extra_disks = [{ interface = "scsi1", size = 50, serial = "data0", backup = false }]
+      }
+      "rocky10-data-02" = {
+        vm_id       = 302
+        extra_disks = [{ interface = "scsi1", size = 50, serial = "data0", backup = false }]
+      }
+    }
+  }
+
+  assert {
+    condition = alltrue([
+      for name in ["rocky10-data-01", "rocky10-data-02"] :
+      module.vm[name].extra_disk_device_paths["scsi1"] == "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_data0"
+    ])
+    error_message = "Deux VMs distinctes doivent pouvoir partager le même serial de disque."
+  }
+}
+
+# Plusieurs disques sur une même VM : chacun expose son propre chemin stable.
+run "rocky10_vm_extra_disks_multiples" {
+  command = plan
+
+  variables {
+    vms = {
+      "rocky10-data-01" = {
+        vm_id = 301
+        extra_disks = [
+          { interface = "scsi2", size = 100, serial = "data1", datastore_id = "local-lvm" },
+          { interface = "scsi1", size = 50, serial = "data0" },
+        ]
+      }
+    }
+  }
+
+  assert {
+    condition     = length(module.vm["rocky10-data-01"].extra_disk_device_paths) == 2
+    error_message = "Les deux disques supplémentaires doivent exposer leur chemin stable."
+  }
+
+  assert {
+    condition     = module.vm["rocky10-data-01"].extra_disk_device_paths["scsi2"] == "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_data1"
+    error_message = "Chaque interface doit être associée au serial de son propre disque."
+  }
+}

@@ -25,6 +25,7 @@ module "vm" {
 
   disk_storage_id = var.disk_storage_id
   disk_size       = coalesce(each.value.disk_size, var.default_disk_size)
+  extra_disks     = each.value.extra_disks
 
   cpu_cores = coalesce(each.value.cpu_cores, var.default_cpu_cores)
   memory    = coalesce(each.value.memory, var.default_memory)

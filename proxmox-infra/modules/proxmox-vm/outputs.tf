@@ -18,6 +18,19 @@ output "started" {
   value       = proxmox_virtual_environment_vm.vm.started
 }
 
+output "extra_disk_device_paths" {
+  description = <<-EOT
+    Chemin stable de chaque disque supplémentaire pourvu d'un serial, indexé par
+    interface. À consommer côté Ansible / DiskPool plutôt que /dev/sdX, dont
+    l'ordre n'est pas garanti d'un redémarrage à l'autre. Les disques sans serial
+    ne sont pas listés : ils n'ont pas de chemin déterministe.
+  EOT
+  value = {
+    for d in var.extra_disks : d.interface => "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_${d.serial}"
+    if d.serial != null
+  }
+}
+
 output "ipv4_addresses" {
   description = "Adresses IPv4 reportées par qemu-guest-agent (disponibles après démarrage)."
   value       = proxmox_virtual_environment_vm.vm.ipv4_addresses

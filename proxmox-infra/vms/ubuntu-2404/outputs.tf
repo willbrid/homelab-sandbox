@@ -7,6 +7,9 @@ output "vms" {
       node_name     = vm.node_name
       started       = vm.started
       ipv4_addresses = vm.ipv4_addresses
+      # Chemins /dev/disk/by-id des disques supplémentaires, à consommer côté
+      # Ansible plutôt que /dev/sdX (ordre non garanti d'un reboot à l'autre).
+      extra_disk_device_paths = vm.extra_disk_device_paths
     }
   }
 }
