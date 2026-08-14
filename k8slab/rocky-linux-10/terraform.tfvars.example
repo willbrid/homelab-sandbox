@@ -1,0 +1,94 @@
+# Copier en terraform.tfvars et adapter.
+
+proxmox_endpoint     = "https://192.168.1.10:8006"
+proxmox_username     = "terraform@pam"
+proxmox_password     = "changeme"
+proxmox_insecure_tls = true
+proxmox_ssh_username = "root"
+proxmox_ssh_password = "changeme"
+
+default_node_name = "pve"
+disk_storage_id   = "local-lvm"
+template_vm_id    = 9002
+
+default_cpu_cores = 2
+default_memory    = 2048
+default_disk_size = 30
+
+network_bridge_primary   = "vmbr0"
+network_bridge_secondary = "vmbr1"
+dns_servers              = ["192.168.1.1", "8.8.8.8"]
+dns_domain               = "willbrid.local"
+
+cloud_init_ssh_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@workstation",
+]
+
+timeout_shutdown_vm = 600
+timeout_stop_vm     = 300
+stop_on_destroy     = false
+
+vms = {
+  "control1" = {
+    vm_id                = 401
+    description          = "Serveur control1 k8s"
+    tags                 = ["k8slab","control"]
+    cpu_cores            = 2
+    memory               = 6144
+    disk_size            = 50
+    ip_address_primary   = "192.168.1.211/24"
+    ip_gateway_primary   = "192.168.1.1"
+    ip_address_secondary = "172.20.1.211/24"
+  }
+  "worker1" = {
+    vm_id                = 402
+    description          = "Serveur worker1 k8s"
+    tags                 = ["k8slab","worker"]
+    cpu_cores            = 4
+    memory               = 12288
+    disk_size            = 80
+    ip_address_primary   = "192.168.1.212/24"
+    ip_gateway_primary   = "192.168.1.1"
+    ip_address_secondary = "172.20.1.212/24"
+    extra_disks = [{
+      interface = "scsi1"
+      size      = 50
+      serial    = "openebs0"
+      backup    = false
+    }]
+  }
+  "worker2" = {
+    vm_id                = 403
+    description          = "Serveur worker2 k8s"
+    tags                 = ["k8slab","worker"]
+    cpu_cores            = 4
+    memory               = 12288
+    disk_size            = 80
+    ip_address_primary   = "192.168.1.213/24"
+    ip_gateway_primary   = "192.168.1.1"
+    ip_address_secondary = "172.20.1.213/24"
+    extra_disks = [{
+      interface = "scsi1"
+      size      = 50
+      serial    = "openebs0"
+      backup    = false
+    }]
+  }
+  "worker3" = {
+    vm_id                = 404
+    description          = "Serveur worker3 k8s"
+    tags                 = ["k8slab","worker"]
+    cpu_cores            = 4
+    memory               = 12288
+    disk_size            = 80
+    ip_address_primary   = "192.168.1.214/24"
+    ip_gateway_primary   = "192.168.1.1"
+    ip_address_secondary = "172.20.1.214/24"
+    extra_disks = [{
+      interface = "scsi1"
+      size      = 50
+      serial    = "openebs0"
+      backup    = false
+    }]
+  }
+}
