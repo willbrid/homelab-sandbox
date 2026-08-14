@@ -486,43 +486,36 @@ vms = {
 
 Le module ne déclare aujourd'hui qu'un seul bloc `disk`, en dur sur `scsi0`. Les workers ayant besoin d'un second disque brut, il faut lui apprendre à en attacher d'autres. L'extension est conçue pour être **rétrocompatible** : liste vide par défaut, donc aucun `plan` non désiré sur les stacks `proxmox-infra/vms/*` existantes.
 
+> **Statut : implémenté.** `var.extra_disks` existe dans `proxmox-infra/modules/proxmox-vm` **et** dans `proxmox-infra/modules/proxmox-vm-template`, et est câblé dans les trois stacks `proxmox-infra/vms/*`. Ce qui suit décrit le résultat ; les validations font foi dans `variables.tf`.
+
 **`variables.tf`** — une liste d'objets plutôt qu'un simple nombre, parce que le besoin porte autant sur les *attributs* du disque que sur sa taille :
 
 ```hcl
 variable "extra_disks" {
-  description = <<-EOT
-    Disques supplémentaires attachés à la VM, en plus du disque racine scsi0.
-    Chaque entrée produit un disque VIERGE : le module ne le partitionne pas, ne
-    le formate pas et ne le monte pas — c'est la charge hébergée qui en décide
-    (ici : les DiskPool OpenEBS/Mayastor des workers).
-      interface : scsi1, scsi2, … — scsi0 est réservé au disque cloné du template
-      serial    : rend le disque adressable de façon stable via
-                  /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_<serial>
-      backup    : false exclut le disque des sauvegardes Proxmox/PBS
-  EOT
   type = list(object({
     interface    = string
     size         = number
     serial       = optional(string)
     datastore_id = optional(string)      # null = var.disk_storage_id
+    file_format  = optional(string)      # null = choix du stockage Proxmox
     discard      = optional(string, "on")
     ssd          = optional(bool, true)
     iothread     = optional(bool, true)
     backup       = optional(bool, true)
+    replicate    = optional(bool, true)
   }))
-  default = []
-
-  validation {
-    condition     = alltrue([for d in var.extra_disks : d.interface != "scsi0"])
-    error_message = "scsi0 est réservé au disque racine cloné depuis le template."
-  }
-
-  validation {
-    condition     = length(distinct([for d in var.extra_disks : d.interface])) == length(var.extra_disks)
-    error_message = "Deux disques supplémentaires ne peuvent pas partager la même interface."
-  }
+  default  = []
+  nullable = false
+  # Validations : interface ∈ scsi1…scsi30 (scsi0 réservé, message dédié),
+  # interfaces uniques, size > 0, serial ≤ 20 caractères [A-Za-z0-9._-] et unique
+  # au sein de la VM, discard ∈ {on, ignore}, file_format ∈ {raw, qcow2, vmdk, null}.
 }
 ```
+
+Deux écarts assumés par rapport au premier jet de cette section :
+
+- **`file_format` n'est pas figé à `raw`.** L'attribut est `Optional+Computed` côté provider : laissé à `null`, le format est celui qu'impose le stockage cible — `raw` sur LVM/ZFS, `qcow2` sur un stockage répertoire. Le figer ferait perdre le thin-provisioning et les snapshots sur un stockage répertoire, sans rien apporter sur `local-lvm`.
+- **Le bus est restreint à `scsi`.** Le provider relit les disques **triés par interface** (`utils.OrderedListFromMap`) alors que le bloc `disk` est une *liste* en état. Un `ide0` ou un `sata0`, qui trient avant `scsi0`, décaleraient la liste et produiraient un diff permanent au plan. Toutes les interfaces acceptées trient après `scsi0` : ordre de la config et ordre de l'état coïncident.
 
 **`main.tf`** — un bloc `dynamic` ajouté après le `disk` existant :
 
@@ -535,30 +528,24 @@ variable "extra_disks" {
       datastore_id = coalesce(disk.value.datastore_id, var.disk_storage_id)
       interface    = disk.key
       size         = disk.value.size
-      file_format  = "raw"
+      file_format  = disk.value.file_format   # null = choix du stockage
       serial       = disk.value.serial
       discard      = disk.value.discard
       ssd          = disk.value.ssd
       iothread     = disk.value.iothread
       backup       = disk.value.backup
+      replicate    = disk.value.replicate
     }
   }
 ```
 
+L'absence de `file_id` est ce qui rend le disque vierge : Proxmox alloue un volume neuf au lieu de copier une image.
+
 **Le `boot_order` n'a pas à changer.** Il vaut déjà `["scsi0"]` : le disque OpenEBS, vierge et sans table de partition, n'est de toute façon pas amorçable, mais l'expliciter évite qu'un BIOS tente de le sonder au démarrage.
 
-**Côté stack**, le champ est ajouté à la `map(object)` des `vms` et transmis tel quel :
+**Côté stack**, le champ est ajouté à la `map(object)` des `vms` (mêmes attributs que le module, les validations restant portées par ce dernier) et transmis tel quel :
 
 ```hcl
-# variables.tf de la stack
-extra_disks = optional(list(object({
-  interface    = string
-  size         = number
-  serial       = optional(string)
-  datastore_id = optional(string)
-  backup       = optional(bool, true)
-})), [])
-
 # main.tf de la stack
 module "vm" {
   # …
@@ -566,11 +553,25 @@ module "vm" {
 }
 ```
 
+**Le chemin stable est exposé en output**, plutôt que reconstruit à la main côté Ansible :
+
+```hcl
+# module proxmox-vm
+output "extra_disk_device_paths" {   # { "scsi1" = "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_openebs0" }
+  value = { for d in var.extra_disks : d.interface =>
+            "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_${d.serial}" if d.serial != null }
+}
+```
+
+Il remonte dans l'output `vms` de chaque stack : c'est lui que consommera le rôle `openebs_node` pour déclarer ses `DiskPool` (§8.8), sans jamais nommer un `/dev/sdX`.
+
+**Côté template** (`proxmox-vm-template`), la même variable existe, avec deux différences : `file_format` retombe sur `var.disk_format` plutôt que sur le choix du stockage, et l'output `extra_disk_interfaces` liste les interfaces héritées. La stack `proxmox-infra/templates` l'expose par template — `ubuntu_2404_extra_disks`, `rocky_9_extra_disks`, `rocky_10_extra_disks` — sur le modèle des variables `*_disk_size` existantes. **À n'utiliser que si TOUTES les VMs issues du template doivent porter le disque** — un disque déclaré sur le template doit être redéclaré à l'identique dans `var.extra_disks` du module `proxmox-vm`, sinon le provider planifie sa suppression sur le clone. Pour le besoin OpenEBS, qui ne concerne que les workers, c'est bien la variable du module `proxmox-vm` qu'il faut utiliser.
+
 **Points de vigilance de cette extension** — les trois vraies difficultés :
 
 | Point | Détail |
 |---|---|
-| **Ajout d'un disque sur une VM clonée** | Le provider `bpg/proxmox` (v0.108.0) apparie les disques par interface. Un `scsi1` absent du template est donc créé, mais c'est le chemin le moins éprouvé du provider : **valider par `tofu test` avec `mock_provider` puis par un `tofu plan` réel** avant de l'appliquer aux trois workers |
+| **Ajout d'un disque sur une VM clonée** | Le provider `bpg/proxmox` (v0.108.0) apparie les disques par interface. Un `scsi1` absent du template est donc créé, mais c'est le chemin le moins éprouvé du provider. Les `tofu test` (`mock_provider`) sont écrits et passent — modules et stacks ; **il reste à confirmer par un `tofu plan` réel** avant de l'appliquer aux trois workers |
 | **La taille n'est réductible que par recréation** | Comme pour `disk_size`, agrandir se fait en place ; réduire impose de détruire la VM. Fixer 100 Go dès le départ, et prévoir plutôt `maxExpansion` côté `DiskPool` (§8.8) |
 | **Nom de périphérique instable** | `/dev/sdb` peut devenir `/dev/sdc` après un redémarrage. C'est exactement ce que le champ `serial` évite : le `DiskPool` référencera `/dev/disk/by-id/…`, jamais `/dev/sdX` (§8.8) |
 
@@ -1416,7 +1417,7 @@ Bridges vmbr0/vmbr1 + local-lvm (HDD 4 To) + template Rocky 10 (9002) + token AP
 - [ ] Activer **KSM** sur l'hôte, régler le ballooning selon §2.3.
 
 ### Phase 1 — IaC & socle
-- [ ] **Étendre le module `proxmox-vm` avec `var.extra_disks`** (§4.5) ; `tofu test` sur les stacks `proxmox-infra/vms/*` existantes pour confirmer l'absence de diff (rétrocompatibilité).
+- [x] **Étendre le module `proxmox-vm` avec `var.extra_disks`** (§4.5) — fait, également sur `proxmox-vm-template`, dans les trois stacks `proxmox-infra/vms/*` et dans la stack `proxmox-infra/templates` ; `tofu test` vert sur les modules et les stacks (les suites existantes passent inchangées : rétrocompatibilité). Reste à confirmer par un `tofu plan` réel contre Proxmox.
 - [ ] Écrire les stacks `devsecops-homelab/vms/{core,data,platform,k8s}` sur le modèle de `proxmox-infra/vms` (§4.3), avec `disk_storage_id = "local-lvm"`.
 - [ ] `tofu test` sur chaque stack (mock provider), puis `tofu apply` dans l'ordre `core` → `data` → `platform` → `k8s`.
 - [ ] **Vérifier le second disque des workers** avant toute suite : `lsblk` doit montrer un disque de 100 Go **sans `FSTYPE` ni `MOUNTPOINT`**, et relever le lien exact sous `/dev/disk/by-id/` (§4.5).
