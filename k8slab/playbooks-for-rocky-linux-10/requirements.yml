@@ -1,0 +1,12 @@
+roles:
+  - name: ansible-role-k8s
+    src: git+https://github.com/willbrid/ansible-role-k8s.git
+    version: main
+
+collections:
+  - name: ansible.posix
+    version: ">=2.2.2"
+  - name: community.general
+    version: ">=9.0.0"
+  - name: kubernetes.core
+    version: ">=5.0.0"

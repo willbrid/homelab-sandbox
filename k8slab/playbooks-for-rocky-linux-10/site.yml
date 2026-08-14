@@ -1,0 +1,6 @@
+---
+- name: Import the primary control plane play
+  ansible.builtin.import_playbook: primary-control-plane.yml
+
+- name: Import the worker nodes play
+  ansible.builtin.import_playbook: worker-node.yml

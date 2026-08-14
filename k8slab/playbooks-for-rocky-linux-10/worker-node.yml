@@ -1,0 +1,10 @@
+---
+- name: Install the worker nodes
+  hosts: node
+  become: true
+
+  vars:
+    kubernetes_role: "node"
+
+  roles:
+    - ansible-role-k8s

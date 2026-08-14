@@ -1,0 +1,18 @@
+kubernetes_version: "1.34"
+kubernetes_patch_version: "1.34.10"
+
+kubernetes_control_plane_ip: "192.168.1.211"
+kubernetes_control_plane_endpoint: "192.168.1.211"
+
+kubernetes_pod_network_cidr: "172.16.0.0/16"
+kubernetes_service_cidr: "10.96.0.0/12"
+
+kubernetes_preflight_enabled: true
+
+kubernetes_cni: "calico"
+kubernetes_calico:
+  version: "v3.32.1"
+  encapsulation: "VXLANCrossSubnet"
+  bgp: "Disabled"
+  api_server: true
+  block_size: 26

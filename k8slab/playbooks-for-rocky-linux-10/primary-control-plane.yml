@@ -1,0 +1,10 @@
+---
+- name: Install the primary control plane
+  hosts: primary_control_plane
+  become: true
+
+  vars:
+    kubernetes_role: "primary_control_plane"
+
+  roles:
+    - ansible-role-k8s
